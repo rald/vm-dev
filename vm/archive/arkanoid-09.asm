@@ -10,29 +10,8 @@ init:
     LDR R1, fff0h
     STR seed, R1
 
-    ; --- 2. RAND for Ball X Position (ball_x: randomized within bounds) ---
-    LDR R1, seed
-    MOV R2, R1
-    SHL R1, 5h          ; R1 = seed * 32
-    ADD R1, R2          ; R1 = seed * 33
-    ADD R1, 35B9h       ; R1 = seed * 33 + 13849
-    STR seed, R1        ; Save updated seed
-
-    ; Mask to keep X within screen bounds (e.g., 04h to 7Ah)
-    MOV R2, R1
-    AND R2, 7Fh         ; Limit range to 0 - 127
-    ; Clamp minimum to 04h to avoid wall clipping
-    CMP R2, 04h
-    JNZ check_xmax
-    MOV R2, 04h
-check_xmax:
-    CMP R2, 7Ah         ; Clamp maximum to 7Ah (122)
-    JNZ store_ball_x
-    MOV R2, 7Ah
-store_ball_x:
-    STR ball_x, R2
-
-    ; --- 3. RAND for Ball Velocity X (ball_vx: +1 or -1) ---
+    ; --- 2. RAND for Ball Velocity X (ball_vx: +1 or -1) ---
+    ; LCG Formula: seed = (seed * 33 + 13849) mod 65536
     LDR R1, seed
     MOV R2, R1
     SHL R1, 5h          ; R1 = seed * 32
@@ -51,7 +30,7 @@ set_vx_neg:
 store_vx:
     STR ball_vx, R0
 
-    ; --- 4. RAND for Ball Velocity Y (ball_vy: +1 or -1) ---
+    ; --- 3. RAND for Ball Velocity Y (ball_vy: +1 or -1) ---
     LDR R1, seed
     MOV R2, R1
     SHL R1, 5h          ; R1 = seed * 32
@@ -73,7 +52,9 @@ store_vy:
     ; Initialize other game variables
     MOV R0, 36h         ; Initial paddle X position (54)
     STR paddle_x, R0
-    MOV R0, 02h         ; Initial ball Y position at the top (2)[cite: 1]
+    MOV R0, 40h         ; Initial ball X position (64)
+    STR ball_x, R0
+    MOV R0, 3ch         ; Initial ball Y position (60)
     STR ball_y, R0
     MOV R0, 0h          ; Initial score
     STR score, R0
@@ -140,6 +121,7 @@ check_right_6bh:
     JNZ move_right
     MOV R2, 6ch
     STR paddle_x, R2
+    JMP update_ball
 
 move_right:
     ADD R2, 2h          ; Smooth movement step
