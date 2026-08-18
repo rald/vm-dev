@@ -1,0 +1,590 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Pantasya Virtual Machine</title>
+    <style>
+        body {
+            background-color: #1a1c23;
+            color: #f4f4f4;
+            font-family: monospace;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+        }
+        .container {
+            display: flex;
+            gap: 20px;
+            background: #282a36;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+        }
+        .pane {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        textarea {
+            width: 420px;
+            height: 420px;
+            background: #1e1f29;
+            color: #f8f8f2;
+            border: 1px solid #44475a;
+            border-radius: 4px;
+            padding: 10px;
+            font-family: monospace;
+            font-size: 13px;
+            resize: none;
+        }
+        canvas {
+            width: 420px;
+            height: 420px;
+            background: #000;
+            image-rendering: pixelated;
+            border: 1px solid #44475a;
+            border-radius: 4px;
+        }
+        .controls {
+            display: flex;
+            gap: 10px;
+        }
+        button {
+            background: #50fa7b;
+            color: #1e1f29;
+            border: none;
+            padding: 10px 20px;
+            font-weight: bold;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        button.stop {
+            background: #ff5555;
+        }
+        button:hover {
+            opacity: 0.9;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <div class="pane">
+        <h3>Source Code</h3>
+        <textarea id="source">; Pantasya Virtual Machine
+; Controls: Left / Right Arrow Keys
+
+.ORG 0x0000
+BALL_X:   .WORD 64
+BALL_Y:   .WORD 40
+BALL_DX:  .WORD 1
+BALL_DY:  .WORD 1
+PAD_X:    .WORD 52
+
+.ORG 0x0100
+START:
+    ; 1. Clear Screen
+    MOV R0, 0x8000
+    MOV R1, 0
+CLEAR_LOOP:
+    MOV R2, R0
+    ADD R2, R1
+    STR R2, 0
+    ADD R1, 1
+    CMP R1, 16384
+    JNZ CLEAR_LOOP
+
+    ; 2. Read Keyboard Input (0xFFFC)
+    MOV R1, 0xFFFC
+    LDR R2, R1
+    
+    ; Check Left Arrow (37)
+    MOV R3, 37
+    CMP R2, R3
+    JNZ CHECK_RIGHT
+    
+    ; Move Paddle Left with Strict Bounds (Min: 2)
+    LDR R4, PAD_X
+    CMP R4, 2
+    JNZ DO_MOVE_LEFT
+    JMP SKIP_MOVE
+DO_MOVE_LEFT:
+    SUB R4, 3
+    CMP R4, 2
+    MOV R7, RF
+    MOV R8, 2
+    AND R7, R8
+    CMP R7, 0
+    JNZ CLAMP_LEFT
+    JMP SAVE_PAD
+CLAMP_LEFT:
+    MOV R4, 2
+    JMP SAVE_PAD
+
+CHECK_RIGHT:
+    ; Check Right Arrow (39)
+    MOV R3, 39
+    CMP R2, R3
+    JNZ SKIP_MOVE
+    
+    ; Move Paddle Right with Strict Bounds (Max: 102)
+    LDR R4, PAD_X
+    CMP R4, 102
+    JNZ DO_MOVE_RIGHT
+    JMP SKIP_MOVE
+DO_MOVE_RIGHT:
+    ADD R4, 3
+    MOV R9, 102
+    CMP R9, R4
+    MOV R7, RF
+    MOV R8, 2
+    AND R7, R8
+    CMP R7, 0
+    JNZ CLAMP_RIGHT
+    JMP SAVE_PAD
+CLAMP_RIGHT:
+    MOV R4, 102
+    JMP SAVE_PAD
+
+SAVE_PAD:
+    STR PAD_X, R4
+
+SKIP_MOVE:
+    ; 3. Update Ball Position
+    LDR R1, BALL_X
+    LDR R2, BALL_DX
+    ADD R1, R2
+    STR BALL_X, R1
+
+    LDR R3, BALL_Y
+    LDR R4, BALL_DY
+    ADD R3, R4
+    STR BALL_Y, R3
+
+    ; 4. Bounce off Left Wall (BALL_X <= 2)
+    CMP R1, 3
+    MOV R7, RF
+    MOV R8, 2
+    AND R7, R8
+    CMP R7, 0
+    JNZ BOUNCE_LEFT
+    JMP CHECK_RIGHT_WALL
+
+BOUNCE_LEFT:
+    MOV R2, 1
+    STR BALL_DX, R2
+    MOV R1, 2
+    STR BALL_X, R1
+    JMP CHECK_TOP_WALL
+
+CHECK_RIGHT_WALL:
+    ; Bounce off Right Wall (BALL_X >= 125)
+    CMP R1, 125
+    MOV R7, RF
+    MOV R8, 1
+    AND R7, R8
+    CMP R7, 0
+    JNZ BOUNCE_RIGHT
+
+    CMP 125, R1
+    MOV R7, RF
+    MOV R8, 2
+    AND R7, R8
+    CMP R7, 0
+    JNZ BOUNCE_RIGHT
+    JMP CHECK_TOP_WALL
+
+BOUNCE_RIGHT:
+    MOV R2, 65535     ; -1 in twos complement
+    STR BALL_DX, R2
+    MOV R1, 125
+    STR BALL_X, R1
+
+CHECK_TOP_WALL:
+    ; 5. Bounce off Top Wall (BALL_Y <= 2)
+    CMP R3, 3
+    MOV R7, RF
+    MOV R8, 2
+    AND R7, R8
+    CMP R7, 0
+    JNZ BOUNCE_TOP
+    JMP CHECK_BOTTOM_OR_PADDLE
+
+BOUNCE_TOP:
+    MOV R4, 1
+    STR BALL_DY, R4
+    MOV R3, 2
+    STR BALL_Y, R3
+    JMP DRAW_SCENE
+
+CHECK_BOTTOM_OR_PADDLE:
+    ; 6. Check Paddle Collision at Y = 120
+    CMP R3, 120
+    JNZ CHECK_BALL_OUT
+    
+    LDR R5, PAD_X     ; Paddle Left X
+    
+    ; Check if Ball X < Paddle Left
+    CMP R1, R5
+    MOV R7, RF
+    MOV R8, 2
+    AND R7, R8
+    CMP R7, 0
+    JNZ BALL_MISSED
+
+    ; Check if Ball X > Paddle Right (PAD_X + 24)
+    MOV R6, R5
+    ADD R6, 24
+    CMP R6, R1
+    MOV R7, RF
+    MOV R8, 2
+    AND R7, R8
+    CMP R7, 0
+    JNZ BALL_MISSED
+
+    ; Successful Hit: Bounce Up (-1)
+    MOV R4, 65535
+    STR BALL_DY, R4
+    JMP DRAW_SCENE
+
+BALL_MISSED:
+    JMP DRAW_SCENE
+
+CHECK_BALL_OUT:
+    CMP R3, 125
+    JNZ DRAW_SCENE
+    ; Reset Ball to Center on Miss
+    MOV R1, 64
+    STR BALL_X, R1
+    MOV R3, 40
+    STR BALL_Y, R3
+    MOV R4, 1
+    STR BALL_DY, R4
+
+DRAW_SCENE:
+    ; 7. Draw Paddle (Width: 24, Height: 3 at Y=120)
+    LDR R1, PAD_X
+    MOV R2, 120
+PADDLE_ROW_LOOP:
+    MOV R3, R2
+    SHL R3, 7
+    ADD R3, R1
+    ADD R3, R0
+    
+    MOV R4, 0
+PADDLE_COL_LOOP:
+    MOV R5, R3
+    ADD R5, R4
+    STR R5, 11
+    ADD R4, 1
+    CMP R4, 24
+    JNZ PADDLE_COL_LOOP
+    
+    ADD R2, 1
+    CMP R2, 123
+    JNZ PADDLE_ROW_LOOP
+
+    ; 8. Draw Ball
+    LDR R1, BALL_X
+    LDR R2, BALL_Y
+    MOV R3, R2
+    SHL R3, 7
+    ADD R3, R1
+    ADD R3, R0
+    STR R3, 7
+
+    ; 9. VWAIT synchronizes frame rate perfectly
+    VWAIT
+
+    JMP START
+</textarea>
+        <div class="controls">
+            <button id="runBtn" onclick="toggleRun()">RUN</button>
+        </div>
+    </div>
+    
+    <div class="pane">
+        <h3>CANVAS</h3>
+        <canvas id="screen" width="128" height="128"></canvas>
+    </div>
+</div>
+
+<script>
+const PALETTE_RGBA = [
+    [26, 28, 35], [56, 43, 61], [92, 53, 70], [143, 64, 77],
+    [203, 77, 79], [250, 110, 89], [255, 155, 107], [255, 209, 117],
+    [204, 246, 156], [121, 214, 125], [40, 164, 120], [29, 111, 120],
+    [25, 60, 89], [18, 28, 46], [35, 41, 54], [107, 110, 128]
+];
+
+const MEM_SIZE = 65536;
+const memory = new Uint8Array(MEM_SIZE);
+const view16 = new DataView(memory.buffer);
+
+const regs = new Uint16Array(16);
+const RC = 12; // PC
+const RD = 13; // SP
+const RE = 14; // CSP
+const RF = 15; // FLAGS
+
+let isRunning = false;
+let animationFrameId = null;
+let frameCount = 0;
+
+const canvas = document.getElementById('screen');
+const ctx = canvas.getContext('2d');
+const imageData = ctx.createImageData(128, 128);
+const dataBuffer = imageData.data;
+
+const FB_START = 0x8000;
+const FB_SIZE = 128 * 128; 
+const STACK_START = 0xF000;
+const CALL_STACK_START = 0xF400;
+const KEYBOARD_ADDR = 0xFFFC;
+const TIMESTAMP_ADDR = 0xFFF0;
+
+function resetVM() {
+    console.log("[Pantasya VM] Resetting VM state...");
+    regs.fill(0);
+    regs[RD] = STACK_START;
+    regs[RE] = CALL_STACK_START;
+    regs[RC] = 0x0100;
+    memory.fill(0);
+    console.log(`[Pantasya VM] Initial Registers: PC=0x${regs[RC].toString(16)}, SP=0x${regs[RD].toString(16)}`);
+}
+
+let instructionsTable = [];
+
+function parseAndLoad(source) {
+    console.log("[Pantasya Assembler] Starting source code parsing...");
+    instructionsTable = [];
+    memory.fill(0);
+    let lines = source.split('\n');
+    let labels = {};
+    let currentAddr = 0;
+    let pendingLines = [];
+
+    for (let rawLine of lines) {
+        let line = rawLine.split(';')[0].trim();
+        if (!line) continue;
+        
+        let parts = line.split(/\s+/);
+        
+        while (parts.length > 0 && parts[0].endsWith(':')) {
+            let labelName = parts[0].slice(0, -1);
+            labels[labelName] = currentAddr;
+            console.log(`[Pantasya Assembler] Label found: ${labelName} -> 0x${currentAddr.toString(16)}`);
+            parts.shift();
+        }
+        if (parts.length === 0) continue;
+
+        if (parts[0] === '.ORG') {
+            currentAddr = parseInt(parts[1], parts[1].startsWith('0x') ? 16 : 10);
+            console.log(`[Pantasya Assembler] .ORG directive: 0x${currentAddr.toString(16)}`);
+            continue;
+        }
+        
+        if (parts[0] === '.WORD') {
+            let vals = parts.slice(1).join(' ').split(',').map(v => parseInt(v.trim(), v.trim().startsWith('0x') ? 16 : 10) || 0);
+            for (let val of vals) {
+                view16.setUint16(currentAddr, val, true);
+                currentAddr += 2;
+            }
+            continue;
+        }
+
+        if (parts[0] === '.BYTE') {
+            let bytes = parts.slice(1).join(' ').split(',').map(b => parseInt(b.trim(), 16));
+            for (let i = 0; i < bytes.length; i++) {
+                memory[currentAddr + i] = bytes[i];
+            }
+            currentAddr += bytes.length;
+            continue;
+        }
+
+        pendingLines.push({ addr: currentAddr, parts });
+        currentAddr += 4;
+    }
+
+    for (let pl of pendingLines) {
+        let parts = pl.parts;
+        let mnemonic = parts[0].toUpperCase();
+        
+        let getVal = (arg) => {
+            if (!arg) return { type: 'IMM', val: 0 };
+            arg = arg.replace(/,/g, '');
+            if (arg.startsWith('R') && arg.length === 2 && !isNaN(parseInt(arg[1], 16))) {
+                return { type: 'REG', val: parseInt(arg[1], 16) };
+            }
+            if (labels[arg] !== undefined) {
+                return { type: 'IMM', val: labels[arg] };
+            }
+            let parsed = parseInt(arg, arg.startsWith('0x') ? 16 : 10);
+            return { type: 'IMM', val: isNaN(parsed) ? 0 : parsed };
+        };
+
+        instructionsTable[pl.addr] = {
+            mnemonic,
+            arg1: getVal(parts[1]),
+            arg2: getVal(parts[2])
+        };
+    }
+    console.log(`[Pantasya Assembler] Parsing complete. Total instruction entries: ${Object.keys(instructionsTable).length}`);
+}
+
+function stepVM() {
+    let pc = regs[RC];
+    let inst = instructionsTable[pc];
+    if (!inst) {
+        console.warn(`[Pantasya VM] No instruction found at PC=0x${pc.toString(16)}. Advancing PC by 4.`);
+        regs[RC] += 4;
+        return true;
+    }
+    regs[RC] += 4;
+
+    const op1 = inst.arg1;
+    const op2 = inst.arg2;
+
+    switch (inst.mnemonic) {
+        case 'MOV':
+            regs[op1.val] = op2.type === 'REG' ? regs[op2.val] : op2.val;
+            break;
+        case 'ADD':
+            regs[op1.val] = (regs[op1.val] + (op2.type === 'REG' ? regs[op2.val] : op2.val)) & 0xFFFF;
+            break;
+        case 'SUB':
+            regs[op1.val] = (regs[op1.val] - (op2.type === 'REG' ? regs[op2.val] : op2.val)) & 0xFFFF;
+            break;
+        case 'AND':
+            regs[op1.val] = regs[op1.val] & (op2.type === 'REG' ? regs[op2.val] : op2.val);
+            break;
+        case 'SHL':
+            regs[op1.val] = (regs[op1.val] << (op2.type === 'REG' ? regs[op2.val] : op2.val)) & 0xFFFF;
+            break;
+        case 'CMP': {
+            let v1 = op1.type === 'REG' ? regs[op1.val] : op1.val;
+            let v2 = op2.type === 'REG' ? regs[op2.val] : op2.val;
+            regs[RF] = (v1 === v2 ? 1 : 0) | (v1 < v2 ? 2 : 0);
+            break;
+        }
+        case 'JMP':
+            regs[RC] = op1.type === 'REG' ? regs[op1.val] : op1.val;
+            break;
+        case 'JNZ':
+            if ((regs[RF] & 1) === 0) {
+                regs[RC] = op1.type === 'REG' ? regs[op1.val] : op1.val;
+            }
+            break;
+        case 'STR': {
+            let addr = op1.type === 'REG' ? regs[op1.val] : op1.val;
+            let val = op2.type === 'REG' ? regs[op2.val] : op2.val;
+            if (addr >= FB_START && addr < FB_START + FB_SIZE) {
+                memory[addr] = val & 0xFF;
+            } else {
+                view16.setUint16(addr, val, true);
+            }
+            break;
+        }
+        case 'LDR': {
+            let addr = op2.type === 'REG' ? regs[op2.val] : op2.val;
+            regs[op1.val] = view16.getUint16(addr, true);
+            break;
+        }
+        case 'VWAIT':
+            return false;
+    }
+    return true;
+}
+
+function updatePeripherals() {
+    view16.setBigUint64(TIMESTAMP_ADDR, BigInt(Date.now()), true);
+}
+
+function renderScreen() {
+    let fb = memory.subarray(FB_START, FB_START + FB_SIZE);
+    let nonZeroCount = 0;
+    for (let i = 0; i < FB_SIZE; i++) {
+        let val = fb[i] & 0x0F;
+        if (val !== 0) nonZeroCount++;
+        let rgb = PALETTE_RGBA[val];
+        let px = i * 4;
+        dataBuffer[px] = rgb[0];
+        dataBuffer[px + 1] = rgb[1];
+        dataBuffer[px + 2] = rgb[2];
+        dataBuffer[px + 3] = 255;
+    }
+    ctx.putImageData(imageData, 0, 0);
+    if (frameCount % 60 === 0) {
+        console.log(`[Render] Frame #${frameCount} rendered. Non-zero framebuffer pixels: ${nonZeroCount}`);
+    }
+}
+
+function frame() {
+    try {
+        frameCount++;
+        for (let i = 0; i < 200000; i++) {
+            let running = stepVM();
+            if (!running) break;
+        }
+        updatePeripherals();
+        renderScreen();
+
+        if (isRunning) {
+            animationFrameId = requestAnimationFrame(frame);
+        }
+    } catch (err) {
+        console.error("[Pantasya VM Error] Execution crashed:", err);
+        stopVM();
+    }
+}
+
+function toggleRun() {
+    if (isRunning) {
+        console.log("[Control] Stopping VM...");
+        stopVM();
+    } else {
+        console.log("[Control] Starting VM...");
+        startVM();
+    }
+}
+
+function startVM() {
+    try {
+        parseAndLoad(document.getElementById('source').value);
+        resetVM();
+        isRunning = true;
+        document.getElementById('runBtn').innerText = 'STOP';
+        document.getElementById('runBtn').classList.add('stop');
+        
+        updatePeripherals();
+        renderScreen();
+
+        animationFrameId = requestAnimationFrame(frame);
+        console.log("[Control] Pantasya VM successfully started.");
+    } catch (err) {
+        console.error("[Load Error] Failed to start VM:", err);
+    }
+}
+
+function stopVM() {
+    isRunning = false;
+    if (animationFrameId) cancelAnimationFrame(animationFrameId);
+    document.getElementById('runBtn').innerText = 'RUN';
+    document.getElementById('runBtn').classList.remove('stop');
+    console.log("[Control] Pantasya VM stopped.");
+}
+
+window.addEventListener('keydown', (e) => {
+    if ([37, 39, 38, 40].includes(e.keyCode)) e.preventDefault();
+    memory[KEYBOARD_ADDR] = e.keyCode & 0xFF;
+});
+window.addEventListener('keyup', () => {
+    memory[KEYBOARD_ADDR] = 0;
+});
+</script>
+
+</body>
+</html>

@@ -1,0 +1,85 @@
+body {
+    background-color: #1a1c23;
+    color: #f4f4f4;
+    font-family: monospace;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100vh;
+    margin: 0;
+}
+
+.container {
+    display: flex;
+    gap: 20px;
+    background: #282a36;
+    padding: 20px;
+    border-radius: 8px;
+    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.5);
+}
+
+.pane {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+textarea {
+    width: 420px;
+    height: 420px;
+    background: #1e1f29;
+    color: #f8f8f2;
+    border: 1px solid #44475a;
+    border-radius: 4px;
+    padding: 10px;
+    font-family: monospace;
+    font-size: 13px;
+    resize: none;
+    box-sizing: border-box;
+}
+
+canvas {
+    width: 420px;
+    height: 420px;
+    background: #000;
+    image-rendering: pixelated;
+    border: 1px solid #44475a;
+    border-radius: 4px;
+    box-sizing: border-box;
+}
+
+.controls {
+    display: flex;
+    gap: 10px;
+    width: 420px; /* Matches the width of the textarea above */
+    box-sizing: border-box;
+}
+
+button, label.upload-btn {
+    background: #50fa7b;
+    color: #1e1f29;
+    border: none;
+    padding: 10px 0;
+    font-weight: bold;
+    border-radius: 4px;
+    cursor: pointer;
+    text-align: center;
+    display: inline-block;
+    font-size: 13px;
+    font-family: monospace;
+    flex: 1;                 /* Forces all buttons to share available space equally */
+    box-sizing: border-box;  /* Ensures padding and borders are included in total width */
+}
+
+button.stop {
+    background: #ff5555;
+}
+
+button:hover, label.upload-btn:hover {
+    opacity: 0.9;
+}
+
+input[type="file"] {
+    display: none;
+}
