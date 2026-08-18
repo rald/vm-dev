@@ -7,7 +7,7 @@ const PALETTE_RGBA = [
 
 const MEM_SIZE = 65536;
 const memory = new Uint8Array(MEM_SIZE);
-const view16 = new DataView(memory.buffer); // Little-endian by default when 'true' flag is passed
+const view16 = new DataView(memory.buffer);
 
 const regs = new Uint16Array(16);
 const RC = 0xC; // PC (12)
@@ -18,7 +18,6 @@ const RF = 0xF; // FLAGS (15)
 let isRunning = false;
 let animationFrameId = null;
 let frameCount = 0;
-let activeKeyCode = 0;
 
 const canvas = document.getElementById('screen');
 const ctx = canvas.getContext('2d');
@@ -26,38 +25,36 @@ const imageData = ctx.createImageData(128, 128);
 const dataBuffer = imageData.data;
 
 // Memory Map Constants
-const FB_START = 0x8000;         // Framebuffer start address
-const FB_SIZE = 128 * 128;       // Framebuffer size (16,384 bytes)
-const STACK_START = 0xF000;      // Stack start pointer
-const CALL_STACK_START = 0xF400; // Call stack start pointer
-const TIMESTAMP_ADDR = 0xFFF0;   // Timestamp MMIO (8 bytes)
+const FB_START = 0x8000;         // Framebuffer start address[cite: 3]
+const FB_SIZE = 128 * 128;       // Framebuffer size (16,384 bytes)[cite: 3]
+const STACK_START = 0xF000;      // Stack start pointer[cite: 3]
+const CALL_STACK_START = 0xF400; // Call stack start pointer[cite: 3]
+const TIMESTAMP_ADDR = 0xFFF0;   // Timestamp MMIO (8 bytes)[cite: 3]
 const MOUSE_X_ADDR = 0xFFF8;     // Mouse X coordinate MMIO (1 byte)
 const MOUSE_Y_ADDR = 0xFFF9;     // Mouse Y coordinate MMIO (1 byte)
-const KEYBOARD_ADDR = 0xFFFC;    // Keyboard MMIO (1 byte)
+const KEYBOARD_ADDR = 0xFFFC;    // Keyboard MMIO (1 byte)[cite: 3]
 
-const VALID_MNEMONICS = ['MOV', 'ADD', 'SUB', 'AND', 'SHL', 'CMP', 'JMP', 'JNZ', 'STR', 'LDR', 'VWAIT', 'HALT'];
+const VALID_MNEMONICS = ['MOV', 'ADD', 'SUB', 'AND', 'SHL', 'CMP', 'JMP', 'JNZ', 'STR', 'LDR', 'VWAIT'];
 const VALID_DIRECTIVES = ['.ORG', '.DW', '.DD', '.DB'];
 
 function resetVM() {
     regs.fill(0);
     regs[RD] = STACK_START;
     regs[RE] = CALL_STACK_START;
-    regs[RC] = 0x0100; // Program Counter reset address
+    regs[RC] = 0x0100; // Program Counter reset address[cite: 3]
     console.log("[Pantasya VM] VM Reset. Registers initialized:", Array.from(regs).map((r, i) => `R${i.toString(16).toUpperCase()}: 0x${r.toString(16)}`));
 }
 
 let instructionsTable = [];
 
-// Helper function to parse numbers supporting 0x prefix and base suffixes (h/H, b/B, o/O, q/Q)
+// Helper function to parse numbers using base suffixes only (h/H, b/B, o/O, q/Q) and halt on error
 function parseNumber(str) {
     if (!str) throw new Error("Missing numerical value.");
     str = str.trim();
     let lower = str.toLowerCase();
     let val;
     
-    if (lower.startsWith('0x')) {
-        val = parseInt(str, 16);
-    } else if (lower.endsWith('h')) {
+    if (lower.endsWith('h')) {
         val = parseInt(str.slice(0, -1), 16);
     } else if (lower.endsWith('b')) {
         val = parseInt(str.slice(0, -1), 2);
@@ -77,13 +74,6 @@ function parseAndLoad(source) {
     console.log("[Pantasya VM] Starting code assembly and loading...");
     instructionsTable = [];
     memory.fill(0);
-    
-    // Initialize entire instruction space with a default NOP (e.g., HALT or a safe fallback) 
-    // so any unmapped or empty execution gaps safely halt/noop instead of throwing segmentation faults.
-    for (let i = 0; i < FB_START; i += 4) {
-        instructionsTable[i] = { mnemonic: 'HALT', arg1: null, arg2: null, lineNum: 0 };
-    }
-
     let lines = source.split('\n');
     let labels = {};
     let currentAddr = 0;
@@ -116,33 +106,21 @@ function parseAndLoad(source) {
                 currentAddr = parseNumber(parts[1]);
                 console.log(`[Assembler] Directive .ORG set currentAddr -> 0x${currentAddr.toString(16)}`);
             } else if (upperDir === '.DW') {
-                let vals = parts.slice(1).join(' ').split(',').map(v => {
-                    let valStr = v.trim();
-                    if (valStr === '$') return currentAddr;
-                    return parseNumber(valStr);
-                });
+                let vals = parts.slice(1).join(' ').split(',').map(v => parseNumber(v.trim()));
                 console.log(`[Assembler] Directive .DW at 0x${currentAddr.toString(16)} with values:`, vals);
                 for (let val of vals) {
                     view16.setUint16(currentAddr, val, true);
                     currentAddr += 2;
                 }
             } else if (upperDir === '.DD') {
-                let vals = parts.slice(1).join(' ').split(',').map(v => {
-                    let valStr = v.trim();
-                    if (valStr === '$') return currentAddr;
-                    return parseNumber(valStr);
-                });
+                let vals = parts.slice(1).join(' ').split(',').map(v => parseNumber(v.trim()));
                 console.log(`[Assembler] Directive .DD at 0x${currentAddr.toString(16)} with values:`, vals);
                 for (let val of vals) {
                     view16.setUint32(currentAddr, val, true);
                     currentAddr += 4;
                 }
             } else if (upperDir === '.DB') {
-                let bytes = parts.slice(1).join(' ').split(',').map(b => {
-                    let byteStr = b.trim();
-                    if (byteStr === '$') return currentAddr & 0xFF;
-                    return parseNumber(byteStr);
-                });
+                let bytes = parts.slice(1).join(' ').split(',').map(b => parseNumber(b.trim()));
                 console.log(`[Assembler] Directive .DB at 0x${currentAddr.toString(16)} with bytes:`, bytes);
                 for (let i = 0; i < bytes.length; i++) {
                     memory[currentAddr + i] = bytes[i] & 0xFF;
@@ -163,16 +141,15 @@ function parseAndLoad(source) {
     for (let pl of pendingLines) {
         let parts = pl.parts;
         let mnemonic = parts[0].toUpperCase();
-        let currentAddr = pl.addr;
         
-        let getVal = (arg) => {
-            if (!arg) return { type: 'IMM', val: 0 };
-            arg = arg.replace(/,/g, '').trim();
-            
-            if (arg === '$') {
-                return { type: 'IMM', val: currentAddr };
+        let getVal = (arg, isRegExpected = false) => {
+            if (!arg) {
+                if (isRegExpected) throw new Error(`Line ${pl.lineNum}: Missing expected argument for instruction "${mnemonic}"`);
+                return { type: 'IMM', val: 0 };
             }
+            arg = arg.replace(/,/g, '');
             
+            // Strict hex register check: matches R0 through RF case-insensitively
             const regRegex = /^r[0-9a-f]$/i;
             if (regRegex.test(arg)) {
                 let regIdx = parseInt(arg.slice(1), 16);
@@ -188,24 +165,19 @@ function parseAndLoad(source) {
         let arg1 = null;
         let arg2 = null;
 
-        if (mnemonic === 'VWAIT' || mnemonic === 'HALT') {
+        if (mnemonic === 'VWAIT') {
             // 0 arguments
         } else if (mnemonic === 'JMP' || mnemonic === 'JNZ') {
-            arg1 = getVal(parts[1]);
+            arg1 = getVal(parts[1], true);
         } else {
-            arg1 = getVal(parts[1]);
-            arg2 = getVal(parts[2]);
-            
-            if (['MOV', 'ADD', 'SUB', 'AND', 'SHL', 'LDR'].includes(mnemonic) && arg1.type !== 'REG') {
-                throw new Error(`Line ${pl.lineNum}: Instruction "${mnemonic}" expects a register destination as its first argument, but got "${parts[1]}"`);
-            }
+            arg1 = getVal(parts[1], true);
+            arg2 = getVal(parts[2], false);
         }
 
         instructionsTable[pl.addr] = {
             mnemonic,
             arg1,
-            arg2,
-            lineNum: pl.lineNum
+            arg2
         };
         console.log(`[Assembler] Instruction [0x${pl.addr.toString(16)}] -> ${mnemonic}`, arg1, arg2);
     }
@@ -213,10 +185,8 @@ function parseAndLoad(source) {
 }
 
 function assembleCode() {
-    stopVM();
     try {
-        const currentSourceCode = document.getElementById('source').value;
-        parseAndLoad(currentSourceCode);
+        parseAndLoad(document.getElementById('source').value);
         console.log("[Pantasya VM] Assemble button triggered. Code is clean.");
         alert("Assembly successful! No errors found. Check console for detailed logs.");
     } catch (err) {
@@ -228,28 +198,12 @@ function assembleCode() {
 function uploadFile(event) {
     const file = event.target.files[0];
     if (!file) return;
-    stopVM();
     const reader = new FileReader();
     reader.onload = function(e) {
         document.getElementById('source').value = e.target.result;
         console.log("[Pantasya VM] File uploaded successfully:", file.name);
     };
     reader.readAsText(file);
-}
-
-function downloadCode() {
-    const textContent = document.getElementById('source').value;
-    const blob = new Blob([textContent], { type: 'text/plain;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const downloadAnchor = document.createElement('a');
-    
-    downloadAnchor.href = url;
-    downloadAnchor.download = 'program.asm';
-    document.body.appendChild(downloadAnchor);
-    downloadAnchor.click();
-    document.body.removeChild(downloadAnchor);
-    URL.revokeObjectURL(url);
-    console.log("[Pantasya VM] Source code downloaded successfully.");
 }
 
 function stepVM() {
@@ -296,7 +250,7 @@ function stepVM() {
         case 'STR': {
             let addr = op1.type === 'REG' ? regs[op1.val] : op1.val;
             let val = op2.type === 'REG' ? regs[op2.val] : op2.val;
-            if (addr >= MEM_SIZE || (addr < FB_START && addr + 1 >= MEM_SIZE)) {
+            if (addr >= MEM_SIZE) {
                 throw new Error(`Memory Access Error: Out of bounds write at address 0x${addr.toString(16)}`);
             }
             if (addr >= FB_START && addr < FB_START + FB_SIZE) {
@@ -315,9 +269,6 @@ function stepVM() {
             break;
         }
         case 'VWAIT':
-            return false;
-        case 'HALT':
-            stopVM();
             return false;
     }
     return true;
@@ -360,11 +311,8 @@ function frame() {
             animationFrameId = requestAnimationFrame(frame);
         }
     } catch(err) {
-        let failingInst = instructionsTable[regs[RC] >= 4 ? regs[RC] - 4 : regs[RC]];
-        let lineInfo = failingInst && failingInst.lineNum ? ` (Source Line: ${failingInst.lineNum})` : "";
-        
-        console.error(`[Runtime Error Halting VM]${lineInfo}:`, err.message);
-        alert(`Runtime Error${lineInfo}: ${err.message}`);
+        console.error("[Runtime Error Halting VM]:", err.message);
+        alert(`Runtime Error: ${err.message}`);
         stopVM();
     }
 }
@@ -379,10 +327,8 @@ function toggleRun() {
 
 function startVM() {
     try {
-        console.log("[Pantasya VM] Assembling and starting execution...");
-        const currentSourceCode = document.getElementById('source').value;
-        parseAndLoad(currentSourceCode);
-        
+        console.log("[Pantasya VM] Starting execution...");
+        parseAndLoad(document.getElementById('source').value);
         resetVM();
         isRunning = true;
         document.getElementById('runBtn').innerText = 'STOP';
@@ -407,10 +353,12 @@ function stopVM() {
     console.log("[Pantasya VM] Execution stopped by user or error.");
 }
 
+// Grab mouse on canvas click using Pointer Lock API
 canvas.addEventListener('click', () => {
     canvas.requestPointerLock();
 });
 
+// Handle mouse movement (supports both pointer lock relative movement and normal absolute hover)
 document.addEventListener('mousemove', (e) => {
     if (document.pointerLockElement === canvas) {
         let x = memory[MOUSE_X_ADDR] + e.movementX;
@@ -433,37 +381,8 @@ document.addEventListener('mousemove', (e) => {
     }
 });
 
-// Textarea shortcut handler for Ctrl+L (Go to Line)
-const sourceTextarea = document.getElementById('source');
-if (sourceTextarea) {
-    sourceTextarea.addEventListener('keydown', (e) => {
-        if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'l') {
-            e.preventDefault();
-            let lines = sourceTextarea.value.split('\n');
-            let input = prompt(`Go to line (1 - ${lines.length}):`);
-            if (input !== null) {
-                let targetLine = parseInt(input, 10);
-                if (!isNaN(targetLine) && targetLine >= 1 && targetLine <= lines.length) {
-                    let charIndex = 0;
-                    for (let i = 0; i < targetLine - 1; i++) {
-                        charIndex += lines[i].length + 1;
-                    }
-                    sourceTextarea.focus();
-                    sourceTextarea.setSelectionRange(charIndex, charIndex);
-                    
-                    let lineHeight = sourceTextarea.scrollHeight / lines.length;
-                    sourceTextarea.scrollTop = (targetLine - 1) * lineHeight;
-                } else {
-                    alert("Invalid line number.");
-                }
-            }
-        }
-    });
-}
-
 window.addEventListener('keydown', (e) => {
-    if (e.target.id === 'source') return;
-
+    // Ungrab mouse with ESC key
     if (e.key === 'Escape' || e.keyCode === 27) {
         if (document.pointerLockElement === canvas) {
             document.exitPointerLock();
@@ -471,6 +390,7 @@ window.addEventListener('keydown', (e) => {
         }
     }
 
+    // Map modern key events to standard key codes
     let code = e.keyCode;
     if (e.key === 'ArrowLeft' || e.code === 'ArrowLeft') code = 37;
     else if (e.key === 'ArrowRight' || e.code === 'ArrowRight') code = 39;
@@ -479,23 +399,10 @@ window.addEventListener('keydown', (e) => {
     else if (e.key === 'Enter' || e.code === 'Enter') code = 13;
 
     if ([37, 39, 38, 40].includes(code)) e.preventDefault();
-    activeKeyCode = code & 0xFF;
-    memory[KEYBOARD_ADDR] = activeKeyCode;
+    memory[KEYBOARD_ADDR] = code & 0xFF;
     console.log(`[Peripherals] Key Down: key = ${e.key}, code = ${code}`);
 });
 
-window.addEventListener('keyup', (e) => {
-    if (e.target.id === 'source') return;
-
-    let code = e.keyCode;
-    if (e.key === 'ArrowLeft' || e.code === 'ArrowLeft') code = 37;
-    else if (e.key === 'ArrowRight' || e.code === 'ArrowRight') code = 39;
-    else if (e.key === 'ArrowUp' || e.code === 'ArrowUp') code = 38;
-    else if (e.key === 'ArrowDown' || e.code === 'ArrowDown') code = 40;
-    else if (e.key === 'Enter' || e.code === 'Enter') code = 13;
-
-    if (code === activeKeyCode) {
-        memory[KEYBOARD_ADDR] = 0;
-        activeKeyCode = 0;
-    }
+window.addEventListener('keyup', () => {
+    memory[KEYBOARD_ADDR] = 0;
 });

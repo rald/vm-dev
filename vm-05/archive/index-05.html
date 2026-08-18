@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Pantasya Virtual Machine - PONG</title>
+    <style>
+        body {
+            background-color: #1a1c23;
+            color: #f4f4f4;
+            font-family: monospace;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+        }
+        .container {
+            display: flex;
+            gap: 20px;
+            background: #282a36;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+        }
+        .pane {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        textarea {
+            width: 420px;
+            height: 420px;
+            background: #1e1f29;
+            color: #f8f8f2;
+            border: 1px solid #44475a;
+            border-radius: 4px;
+            padding: 10px;
+            font-family: monospace;
+            font-size: 13px;
+            resize: none;
+            box-sizing: border-box;
+        }
+        canvas {
+            width: 420px;
+            height: 420px;
+            background: #000;
+            image-rendering: pixelated;
+            border: 1px solid #44475a;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+        .controls {
+            display: flex;
+            gap: 10px;
+        }
+        button, label.upload-btn {
+            background: #50fa7b;
+            color: #1e1f29;
+            border: none;
+            padding: 10px 20px;
+            font-weight: bold;
+            border-radius: 4px;
+            cursor: pointer;
+            text-align: center;
+            display: inline-block;
+            font-size: 13px;
+            font-family: monospace;
+        }
+        button.stop {
+            background: #ff5555;
+        }
+        button:hover, label.upload-btn:hover {
+            opacity: 0.9;
+        }
+        input[type="file"] {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <div class="pane">
+        <h3>Source Code</h3>
+        <textarea id="source"></textarea>
+        <div class="controls">
+            <button id="runBtn" onclick="toggleRun()">RUN</button>
+            <label class="upload-btn" for="fileInput">UPLOAD</label>
+            <input type="file" id="fileInput" accept=".asm,.txt" onchange="uploadFile(event)">
+        </div>
+    </div>
+    
+    <div class="pane">
+        <h3>Canvas</h3>
+        <canvas id="screen" width="128" height="128"></canvas>
+    </div>
+</div>
+
+<script>
+const PALETTE_RGBA = [
+    [26, 28, 35], [56, 43, 61], [92, 53, 70], [143, 64, 77],
+    [203, 77, 79], [250, 110, 89], [255, 155, 107], [255, 209, 117],
+    [204, 246, 156], [121, 214, 125], [40, 164, 120], [29, 111, 120],
+    [25, 60, 89], [18, 28, 46], [35, 41, 54], [107, 110, 128]
+];
+
+const MEM_SIZE = 65536;
+const memory = new Uint8Array(MEM_SIZE);
+const view16 = new DataView(memory.buffer);
+
+const regs = new Uint16Array(16);
+const RC = 12; // PC
+const RD = 13; // SP
+const RE = 14; // CSP
+const RF = 15; // FLAGS
+
+let isRunning = false;
+let animationFrameId = null;
+let frameCount = 0;
+
+const canvas = document.getElementById('screen');
+const ctx = canvas.getContext('2d');
+const imageData = ctx.createImageData(128, 128);
+const dataBuffer = imageData.data;
+
+const FB_START = 0x8000;
+const FB_SIZE = 128 * 128; 
+const STACK_START = 0xF000;
+const CALL_STACK_START = 0xF400;
+const KEYBOARD_ADDR = 0xFFFC;
+const TIMESTAMP_ADDR = 0xFFF0;
+
+function resetVM() {
+    console.log("[Pantasya VM] Resetting VM state...");
+    regs.fill(0);
+    regs[RD] = STACK_START;
+    regs[RE] = CALL_STACK_START;
+    regs[RC] = 0x0100;
+}
+
+let instructionsTable = [];
+
+function parseAndLoad(source) {
+    console.log("[Pantasya Assembler] Starting source code parsing...");
+    instructionsTable = [];
+    memory.fill(0);
+    let lines = source.split('\n');
+    let labels = {};
+    let currentAddr = 0;
+    let pendingLines = [];
+
+    for (let rawLine of lines) {
+        let line = rawLine.split(';')[0].trim();
+        if (!line) continue;
+        
+        let parts = line.split(/\s+/);
+        
+        while (parts.length > 0 && parts[0].endsWith(':')) {
+            let labelName = parts[0].slice(0, -1);
+            labels[labelName] = currentAddr;
+            parts.shift();
+        }
+        if (parts.length === 0) continue;
+
+        if (parts[0] === '.ORG') {
+            currentAddr = parseInt(parts[1], parts[1].startsWith('0x') ? 16 : 10);
+            continue;
+        }
+        
+        if (parts[0] === '.WORD') {
+            let vals = parts.slice(1).join(' ').split(',').map(v => parseInt(v.trim(), v.trim().startsWith('0x') ? 16 : 10) || 0);
+            for (let val of vals) {
+                view16.setUint16(currentAddr, val, true);
+                currentAddr += 2;
+            }
+            continue;
+        }
+
+        if (parts[0] === '.BYTE') {
+            let bytes = parts.slice(1).join(' ').split(',').map(b => parseInt(b.trim(), 16));
+            for (let i = 0; i < bytes.length; i++) {
+                memory[currentAddr + i] = bytes[i];
+            }
+            currentAddr += bytes.length;
+            continue;
+        }
+
+        pendingLines.push({ addr: currentAddr, parts });
+        currentAddr += 4;
+    }
+
+    for (let pl of pendingLines) {
+        let parts = pl.parts;
+        let mnemonic = parts[0].toUpperCase();
+        
+        let getVal = (arg) => {
+            if (!arg) return { type: 'IMM', val: 0 };
+            arg = arg.replace(/,/g, '');
+            if (arg.startsWith('R') && !isNaN(parseInt(arg.slice(1), 10))) {
+                return { type: 'REG', val: parseInt(arg.slice(1), 10) };
+            }
+            if (labels[arg] !== undefined) {
+                return { type: 'IMM', val: labels[arg] };
+            }
+            let parsed = parseInt(arg, arg.startsWith('0x') ? 16 : 10);
+            return { type: 'IMM', val: isNaN(parsed) ? 0 : parsed };
+        };
+
+        instructionsTable[pl.addr] = {
+            mnemonic,
+            arg1: getVal(parts[1]),
+            arg2: getVal(parts[2])
+        };
+    }
+}
+
+function uploadFile(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = function(e) {
+        document.getElementById('source').value = e.target.result;
+    };
+    reader.readAsText(file);
+}
+
+function stepVM() {
+    let pc = regs[RC];
+    let inst = instructionsTable[pc];
+    if (!inst) {
+        regs[RC] += 4;
+        return true;
+    }
+    regs[RC] += 4;
+
+    const op1 = inst.arg1;
+    const op2 = inst.arg2;
+
+    switch (inst.mnemonic) {
+        case 'MOV':
+            regs[op1.val] = op2.type === 'REG' ? regs[op2.val] : op2.val;
+            break;
+        case 'ADD':
+            regs[op1.val] = (regs[op1.val] + (op2.type === 'REG' ? regs[op2.val] : op2.val)) & 0xFFFF;
+            break;
+        case 'SUB':
+            regs[op1.val] = (regs[op1.val] - (op2.type === 'REG' ? regs[op2.val] : op2.val)) & 0xFFFF;
+            break;
+        case 'AND':
+            regs[op1.val] = regs[op1.val] & (op2.type === 'REG' ? regs[op2.val] : op2.val);
+            break;
+        case 'SHL':
+            regs[op1.val] = (regs[op1.val] << (op2.type === 'REG' ? regs[op2.val] : op2.val)) & 0xFFFF;
+            break;
+        case 'CMP': {
+            let v1 = op1.type === 'REG' ? regs[op1.val] : op1.val;
+            let v2 = op2.type === 'REG' ? regs[op2.val] : op2.val;
+            regs[RF] = (v1 === v2 ? 1 : 0) | (v1 < v2 ? 2 : 0);
+            break;
+        }
+        case 'JMP':
+            regs[RC] = op1.type === 'REG' ? regs[op1.val] : op1.val;
+            break;
+        case 'JNZ':
+            if ((regs[RF] & 1) === 0) {
+                regs[RC] = op1.type === 'REG' ? regs[op1.val] : op1.val;
+            }
+            break;
+        case 'STR': {
+            let addr = op1.type === 'REG' ? regs[op1.val] : op1.val;
+            let val = op2.type === 'REG' ? regs[op2.val] : op2.val;
+            if (addr >= FB_START && addr < FB_START + FB_SIZE) {
+                memory[addr] = val & 0xFF;
+            } else {
+                view16.setUint16(addr, val, true);
+            }
+            break;
+        }
+        case 'LDR': {
+            let addr = op2.type === 'REG' ? regs[op2.val] : op2.val;
+            regs[op1.val] = view16.getUint16(addr, true);
+            break;
+        }
+        case 'VWAIT':
+            return false;
+    }
+    return true;
+}
+
+function updatePeripherals() {
+    view16.setBigUint64(TIMESTAMP_ADDR, BigInt(Date.now()), true);
+}
+
+function renderScreen() {
+    let fb = memory.subarray(FB_START, FB_START + FB_SIZE);
+    
+    let scoreVal = view16.getUint16(0x000A, true);
+    scoreVal = Math.min(scoreVal, 999);
+    let hundreds = Math.floor(scoreVal / 100);
+    let tens = Math.floor((scoreVal % 100) / 10);
+    let ones = scoreVal % 10;
+
+    function drawDigit(digit, startX, startY) {
+        let fontBase = 0x0800 + (digit * 8);
+        for (let r = 0; r < 8; r++) {
+            let rowByte = memory[fontBase + r];
+            for (let c = 0; c < 8; c++) {
+                if ((rowByte & (1 << (7 - c))) !== 0) {
+                    let px = startX + c;
+                    let py = startY + r;
+                    if (px >= 0 && px < 128 && py >= 0 && py < 128) {
+                        fb[py * 128 + px] = 15;
+                    }
+                }
+            }
+        }
+    }
+
+    drawDigit(hundreds, 4, 4);
+    drawDigit(tens, 12, 4);
+    drawDigit(ones, 20, 4);
+
+    for (let i = 0; i < FB_SIZE; i++) {
+        let val = fb[i] & 0x0F;
+        let rgb = PALETTE_RGBA[val];
+        let px = i * 4;
+        dataBuffer[px] = rgb[0];
+        dataBuffer[px + 1] = rgb[1];
+        dataBuffer[px + 2] = rgb[2];
+        dataBuffer[px + 3] = 255;
+    }
+    ctx.putImageData(imageData, 0, 0);
+}
+
+function frame() {
+    try {
+        frameCount++;
+        for (let i = 0; i < 200000; i++) {
+            let running = stepVM();
+            if (!running) break;
+        }
+        updatePeripherals();
+        renderScreen();
+
+        if (isRunning) {
+            animationFrameId = requestAnimationFrame(frame);
+        }
+    } catch (err) {
+        console.error("[Pantasya VM Error] Execution crashed:", err);
+        stopVM();
+    }
+}
+
+function toggleRun() {
+    if (isRunning) {
+        stopVM();
+    } else {
+        startVM();
+    }
+}
+
+function startVM() {
+    try {
+        parseAndLoad(document.getElementById('source').value);
+        resetVM();
+        isRunning = true;
+        document.getElementById('runBtn').innerText = 'STOP';
+        document.getElementById('runBtn').classList.add('stop');
+        
+        updatePeripherals();
+        renderScreen();
+
+        animationFrameId = requestAnimationFrame(frame);
+    } catch (err) {
+        console.error("[Load Error] Failed to start VM:", err);
+    }
+}
+
+function stopVM() {
+    isRunning = false;
+    if (animationFrameId) cancelAnimationFrame(animationFrameId);
+    document.getElementById('runBtn').innerText = 'RUN';
+    document.getElementById('runBtn').classList.remove('stop');
+}
+
+window.addEventListener('keydown', (e) => {
+    if ([37, 39, 38, 40].includes(e.keyCode)) e.preventDefault();
+    memory[KEYBOARD_ADDR] = e.keyCode & 0xFF;
+});
+window.addEventListener('keyup', () => {
+    memory[KEYBOARD_ADDR] = 0;
+});
+</script>
+
+</body>
+</html>

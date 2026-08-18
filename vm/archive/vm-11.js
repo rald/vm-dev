@@ -77,13 +77,6 @@ function parseAndLoad(source) {
     console.log("[Pantasya VM] Starting code assembly and loading...");
     instructionsTable = [];
     memory.fill(0);
-    
-    // Initialize entire instruction space with a default NOP (e.g., HALT or a safe fallback) 
-    // so any unmapped or empty execution gaps safely halt/noop instead of throwing segmentation faults.
-    for (let i = 0; i < FB_START; i += 4) {
-        instructionsTable[i] = { mnemonic: 'HALT', arg1: null, arg2: null, lineNum: 0 };
-    }
-
     let lines = source.split('\n');
     let labels = {};
     let currentAddr = 0;
@@ -215,8 +208,7 @@ function parseAndLoad(source) {
 function assembleCode() {
     stopVM();
     try {
-        const currentSourceCode = document.getElementById('source').value;
-        parseAndLoad(currentSourceCode);
+        parseAndLoad(document.getElementById('source').value);
         console.log("[Pantasya VM] Assemble button triggered. Code is clean.");
         alert("Assembly successful! No errors found. Check console for detailed logs.");
     } catch (err) {
@@ -379,10 +371,8 @@ function toggleRun() {
 
 function startVM() {
     try {
-        console.log("[Pantasya VM] Assembling and starting execution...");
-        const currentSourceCode = document.getElementById('source').value;
-        parseAndLoad(currentSourceCode);
-        
+        console.log("[Pantasya VM] Starting execution...");
+        parseAndLoad(document.getElementById('source').value);
         resetVM();
         isRunning = true;
         document.getElementById('runBtn').innerText = 'STOP';

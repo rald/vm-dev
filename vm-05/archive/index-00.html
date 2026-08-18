@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Minimalist 16-bit VM</title>
+    <style>
+        body {
+            background-color: #1a1c23;
+            color: #f4f4f4;
+            font-family: monospace;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+        }
+        .container {
+            display: flex;
+            gap: 20px;
+            background: #282a36;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+        }
+        .pane {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        textarea {
+            width: 400px;
+            height: 400px;
+            background: #1e1f29;
+            color: #f8f8f2;
+            border: 1px solid #44475a;
+            border-radius: 4px;
+            padding: 10px;
+            font-family: monospace;
+            font-size: 14px;
+            resize: none;
+        }
+        canvas {
+            width: 400px;
+            height: 400px;
+            background: #000;
+            image-rendering: pixelated;
+            border: 1px solid #44475a;
+            border-radius: 4px;
+        }
+        .controls {
+            display: flex;
+            gap: 10px;
+        }
+        button {
+            background: #50fa7b;
+            color: #1e1f29;
+            border: none;
+            padding: 10px 20px;
+            font-weight: bold;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        button.stop {
+            background: #ff5555;
+        }
+        button:hover {
+            opacity: 0.9;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <div class="pane">
+        <h3>SOURCE CODE</h3>
+        <textarea id="source">; Sweetie 16-bit VM Demo
+; Draws a pulsing pixel on screen using Frame Buffer
+.ORG 0x0000
+START:
+    MOV R0, 0x8000   ; Framebuffer base
+    MOV R1, 0        ; X counter
+    MOV R2, 0        ; Y counter
+
+LOOP:
+    ; Calculate offset: Y * 128 + X
+    MOV R3, R2
+    SHL R3, 7        ; * 128
+    ADD R3, R1
+    ADD R3, R0       ; Mem address of pixel
+    
+    ; Compute color: (X + Y) % 16
+    MOV R4, R1
+    ADD R4, R2
+    AND R4, 0x0F     
+    
+    ; Write pixel
+    STR R3, R4
+
+    ADD R1, 1
+    CMP R1, 128
+    JNZ LOOP
+    MOV R1, 0
+    
+    ADD R2, 1
+    CMP R2, 128
+    JNZ LOOP
+    MOV R2, 0
+    
+    JMP LOOP
+</textarea>
+        <div class="controls">
+            <button id="runBtn" onclick="toggleRun()">RUN</button>
+        </div>
+    </div>
+    
+    <div class="pane">
+        <h3>CANVAS</h3>
+        <canvas id="screen" width="128" height="128"></canvas>
+    </div>
+</div>
+
+<script>
+// Sweetie 16-colors Palette
+const PALETTE = [
+    '#1a1c23', '#382b3d', '#5c3546', '#8f404d',
+    '#cb4d4f', '#fa6e59', '#ff9b6b', '#ffd175',
+    '#ccf69c', '#79d67d', '#28a478', '#1d6f78',
+    '#193c59', '#121c2e', '#232936', '#6b6e80'
+];
+
+const MEM_SIZE = 65536;
+const memory = new Uint8Array(MEM_SIZE);
+const view16 = new DataView(memory.buffer);
+
+// Registers: R0-RF (16 general/special registers, 2 bytes each = 32 bytes)
+const regs = new Uint16Array(16);
+const RC = 12; // PC
+const RD = 13; // SP
+const RE = 14; // CSP
+const RF = 15; // FLAGS
+
+let isRunning = false;
+let animationFrameId = null;
+
+const canvas = document.getElementById('screen');
+const ctx = canvas.getContext('2d');
+const imageData = ctx.createImageData(128, 128);
+
+// Memory Map Constants
+const FB_START = 0x8000;
+const FB_SIZE = 128 * 128; 
+const STACK_START = 0xF000;
+const CALL_STACK_START = 0xF400;
+const KEYBOARD_ADDR = 0xFFFC;
+const MOUSE_X_ADDR = 0xFFFD;
+const MOUSE_Y_ADDR = 0xFFFE;
+const TIMESTAMP_ADDR = 0xFFF0;
+
+function resetVM() {
+    regs.fill(0);
+    regs[RD] = STACK_START;
+    regs[RE] = CALL_STACK_START;
+    regs[RC] = 0x0000;
+}
+
+let instructionsTable = [];
+
+function parseAndLoad(source) {
+    instructionsTable = [];
+    memory.fill(0);
+    let lines = source.split('\n');
+    let labels = {};
+    let currentAddr = 0;
+    let parsedLines = [];
+
+    for (let rawLine of lines) {
+        let line = rawLine.split(';')[0].trim();
+        if (!line) continue;
+        let parts = line.split(/\s+/);
+        if (parts[0].endsWith(':')) {
+            labels[parts[0].slice(0, -1)] = currentAddr;
+            parts.shift();
+            if (parts.length === 0) continue;
+        }
+        if (parts[0] === '.ORG') {
+            currentAddr = parseInt(parts[1], parts[1].startsWith('0x') ? 16 : 10);
+            continue;
+        }
+        parsedLines.push({ addr: currentAddr, parts });
+        currentAddr += 4;
+    }
+
+    for (let pl of parsedLines) {
+        let parts = pl.parts;
+        let mnemonic = parts[0].toUpperCase();
+        let getVal = (arg) => {
+            if (!arg) return 0;
+            if (arg.startsWith('R')) return { type: 'REG', val: parseInt(arg[1], 16) };
+            if (labels[arg] !== undefined) return { type: 'IMM', val: labels[arg] };
+            return { type: 'IMM', val: parseInt(arg, arg.startsWith('0x') ? 16 : 10) };
+        };
+        instructionsTable[pl.addr] = {
+            mnemonic,
+            arg1: getVal(parts[1]),
+            arg2: getVal(parts[2])
+        };
+    }
+}
+
+function stepVM() {
+    let pc = regs[RC];
+    let inst = instructionsTable[pc];
+    if (!inst) {
+        regs[RC] += 4;
+        return;
+    }
+
+    regs[RC] += 4;
+
+    const getOpValue = (op) => op.type === 'REG' ? regs[op.val] : op.val;
+
+    switch (inst.mnemonic) {
+        case 'MOV':
+            regs[inst.arg1.val] = getOpValue(inst.arg2);
+            break;
+        case 'ADD':
+            regs[inst.arg1.val] = (regs[inst.arg1.val] + getOpValue(inst.arg2)) & 0xFFFF;
+            break;
+        case 'SUB':
+            regs[inst.arg1.val] = (regs[inst.arg1.val] - getOpValue(inst.arg2)) & 0xFFFF;
+            break;
+        case 'AND':
+            regs[inst.arg1.val] = regs[inst.arg1.val] & getOpValue(inst.arg2);
+            break;
+        case 'SHL':
+            regs[inst.arg1.val] = (regs[inst.arg1.val] << getOpValue(inst.arg2)) & 0xFFFF;
+            break;
+        case 'CMP': {
+            let v1 = getOpValue(inst.arg1);
+            let v2 = getOpValue(inst.arg2);
+            regs[RF] = (v1 === v2 ? 1 : 0) | (v1 < v2 ? 2 : 0);
+            break;
+        }
+        case 'JMP':
+            regs[RC] = getOpValue(inst.arg1);
+            break;
+        case 'JNZ':
+            if ((regs[RF] & 1) === 0) {
+                regs[RC] = getOpValue(inst.arg1);
+            }
+            break;
+        case 'STR': {
+            let addr = getOpValue(inst.arg1);
+            let val = getOpValue(inst.arg2);
+            memory[addr] = val & 0xFF;
+            break;
+        }
+        case 'LDR': {
+            let addr = getOpValue(inst.arg2);
+            regs[inst.arg1.val] = memory[addr];
+            break;
+        }
+    }
+}
+
+function updatePeripherals() {
+    let now = BigInt(Date.now());
+    view16.setBigUint64(TIMESTAMP_ADDR, now, true);
+}
+
+function renderScreen() {
+    let fb = memory.subarray(FB_START, FB_START + FB_SIZE);
+    let data = imageData.data;
+    for (let i = 0; i < FB_SIZE; i++) {
+        let colorIdx = fb[i] % 16;
+        let hex = PALETTE[colorIdx];
+        let r = parseInt(hex.slice(1, 3), 16);
+        let g = parseInt(hex.slice(3, 5), 16);
+        let b = parseInt(hex.slice(5, 7), 16);
+        
+        let px = i * 4;
+        data[px] = r;
+        data[px + 1] = g;
+        data[px + 2] = b;
+        data[px + 3] = 255;
+    }
+    ctx.putImageData(imageData, 0, 0);
+}
+
+function frame() {
+    try {
+        for (let i = 0; i < 200; i++) {
+            stepVM();
+        }
+        updatePeripherals();
+        renderScreen();
+        if (isRunning) {
+            animationFrameId = requestAnimationFrame(frame);
+        }
+    } catch (err) {
+        console.error("VM Execution Error:", err);
+        stopVM();
+    }
+}
+
+function toggleRun() {
+    if (isRunning) {
+        stopVM();
+    } else {
+        startVM();
+    }
+}
+
+function startVM() {
+    try {
+        parseAndLoad(document.getElementById('source').value);
+        resetVM();
+        isRunning = true;
+        document.getElementById('runBtn').innerText = 'STOP';
+        document.getElementById('runBtn').classList.add('stop');
+        animationFrameId = requestAnimationFrame(frame);
+    } catch (err) {
+        console.error("VM Load Error:", err);
+    }
+}
+
+function stopVM() {
+    isRunning = false;
+    if (animationFrameId) cancelAnimationFrame(animationFrameId);
+    document.getElementById('runBtn').innerText = 'RUN';
+    document.getElementById('runBtn').classList.remove('stop');
+}
+
+window.addEventListener('keydown', (e) => {
+    memory[KEYBOARD_ADDR] = e.keyCode & 0xFF;
+});
+window.addEventListener('keyup', () => {
+    memory[KEYBOARD_ADDR] = 0;
+});
+canvas.addEventListener('mousemove', (e) => {
+    let rect = canvas.getBoundingClientRect();
+    let x = Math.floor((e.clientX - rect.left) * (128 / rect.width));
+    let y = Math.floor((e.clientY - rect.top) * (128 / rect.height));
+    memory[MOUSE_X_ADDR] = x & 0xFF;
+    memory[MOUSE_Y_ADDR] = y & 0xFF;
+});
+</script>
+
+</body>
+</html>

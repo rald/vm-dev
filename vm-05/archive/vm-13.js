@@ -75,15 +75,11 @@ function parseNumber(str) {
 
 function parseAndLoad(source) {
     console.log("[Pantasya VM] Starting code assembly and loading...");
-    instructionsTable = [];
+    
+    // Initialize entire memory with NOP equivalent (0x00)
     memory.fill(0);
     
-    // Initialize entire instruction space with a default NOP (e.g., HALT or a safe fallback) 
-    // so any unmapped or empty execution gaps safely halt/noop instead of throwing segmentation faults.
-    for (let i = 0; i < FB_START; i += 4) {
-        instructionsTable[i] = { mnemonic: 'HALT', arg1: null, arg2: null, lineNum: 0 };
-    }
-
+    instructionsTable = [];
     let lines = source.split('\n');
     let labels = {};
     let currentAddr = 0;
@@ -209,7 +205,7 @@ function parseAndLoad(source) {
         };
         console.log(`[Assembler] Instruction [0x${pl.addr.toString(16)}] -> ${mnemonic}`, arg1, arg2);
     }
-    console.log("[Pantasya VM] Assembly completed successfully.");
+    console.log("[Pantasya VM] Assembly completed successfully with memory NOP-initialized.");
 }
 
 function assembleCode() {
