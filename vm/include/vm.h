@@ -74,7 +74,7 @@ static inline uint16_t enc_i12(uint8_t op, int16_t imm12) {
 
 static inline int32_t sext12(uint16_t w) {
     uint16_t v = w & 0x0FFFu;
-    return (v & 0x0800u) ? (int32_t)(v | 0xFFFFF000u) : (int32_t)v;
+    return (v & 0x0800u) ? (int32_t)v - 0x1000 : (int32_t)v;
 }
 
 void vm_env_init(vm_env_t *env, uint8_t *mem, size_t mem_size,
@@ -87,7 +87,10 @@ int32_t vm_run(const uint16_t *code, size_t code_len,
                uint8_t *mem, size_t mem_size,
                int32_t init_pc, int32_t init_lr, int32_t init_sp);
 
-/* Simple two-pass assembler for VM assembly files */
+/*
+ * Assemble a source file into out_code. On failure, returns -1 and leaves both
+ * out_code and out_len unchanged; all three pointer arguments must be non-NULL.
+ */
 int vm_assemble_file(const char *path, uint16_t *out_code, size_t max_code, size_t *out_len);
 
 #endif /* VM_H */

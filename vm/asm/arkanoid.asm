@@ -411,7 +411,8 @@ draw_borders:
     ; Playfield top line below 8x8 DOS HUD (x=0..127, y=10..11, color=14)
     movi r1, 0
     movi r2, 10
-    movi r3, 128
+    movi r3, 64
+    shl  r3, 1
     movi r4, 2
     movi r5, 14
     call fill_rect

@@ -1,116 +1,195 @@
 #include "vm.h"
+
 #include <ctype.h>
+#include <errno.h>
+#include <limits.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 
-static inline int32_t load32_le(const uint8_t *mem, uint32_t addr) {
-    int32_t val;
-    memcpy(&val, mem + addr, sizeof(val));
-    return val;
+static int32_t uint32_to_int32(uint32_t value) {
+    if (value <= INT32_MAX) return (int32_t)value;
+    return -1 - (int32_t)(UINT32_MAX - value);
 }
 
-static inline void store32_le(uint8_t *mem, uint32_t addr, int32_t val) {
-    memcpy(mem + addr, &val, sizeof(val));
+static int32_t sign_extend8(uint8_t value) {
+    return (value & 0x80u) ? (int32_t)value - 0x100 : (int32_t)value;
+}
+
+static int32_t load32_le(const uint8_t *mem, size_t addr) {
+    uint32_t value = (uint32_t)mem[addr] |
+                     ((uint32_t)mem[addr + 1] << 8) |
+                     ((uint32_t)mem[addr + 2] << 16) |
+                     ((uint32_t)mem[addr + 3] << 24);
+    return uint32_to_int32(value);
+}
+
+static void store32_le(uint8_t *mem, size_t addr, int32_t value) {
+    uint32_t bits = (uint32_t)value;
+    mem[addr] = (uint8_t)bits;
+    mem[addr + 1] = (uint8_t)(bits >> 8);
+    mem[addr + 2] = (uint8_t)(bits >> 16);
+    mem[addr + 3] = (uint8_t)(bits >> 24);
 }
 
 void vm_env_init(vm_env_t *env, uint8_t *mem, size_t mem_size,
                  int32_t init_pc, int32_t init_lr, int32_t init_sp) {
+    if (!env) return;
     memset(env, 0, sizeof(*env));
     env->mem = mem;
-    env->mem_size = mem_size;
+    env->mem_size = mem ? mem_size : 0;
     env->pc = init_pc;
     env->r[14] = init_lr;
     env->r[15] = init_sp;
-    env->halted = false;
-    env->frame_ready = false;
+}
+
+static void vm_halt(vm_env_t *env, size_t pc) {
+    env->pc = pc <= INT32_MAX ? (int32_t)pc : INT32_MAX;
+    env->halted = true;
+}
+
+static bool memory_range_valid(size_t mem_size, int32_t base, uint8_t word_offset,
+                               size_t *address) {
+    int64_t effective = (int64_t)base + (int64_t)word_offset * 4;
+    if (effective < 0 || (uint64_t)effective > mem_size) return false;
+    size_t addr = (size_t)effective;
+    if (mem_size - addr < sizeof(uint32_t)) return false;
+    *address = addr;
+    return true;
 }
 
 int32_t vm_run_env(vm_env_t *env, const uint16_t *code, size_t code_len,
                    size_t max_steps) {
-    if (!env || env->halted) return env ? env->r[0] : 0;
+    if (!env) return 0;
+    if (env->halted) return env->r[0];
+    if (!code || !env->mem || code_len > INT32_MAX || env->pc < 0 ||
+        (size_t)env->pc >= code_len) {
+        vm_halt(env, env->pc < 0 ? 0 : (size_t)env->pc);
+        return env->r[0];
+    }
 
-    int32_t *r = env->r;
-    uint8_t *mem = env->mem;
-    size_t mem_size = env->mem_size;
-    const uint16_t *pc = code + env->pc;
-    const uint16_t *code_end = code + code_len;
+    size_t pc = (size_t)env->pc;
     size_t steps = 0;
+    env->frame_ready = false;
 
-    static const void *dispatch[] = {
-        &&L_JR,    &&L_MOVI,  &&L_MOV,   &&L_ADD,
-        &&L_SUB,   &&L_AND,   &&L_OR,    &&L_XOR,
-        &&L_SHL,   &&L_SHR,   &&L_CMPLT, &&L_JMP,
-        &&L_JZ,    &&L_LD32,  &&L_ST32,  &&L_CALL
-    };
-
-    uint8_t a = 0, b = 0, c = 0, i8 = 0;
-
-#define NEXT() do {                                                     \
-        if (pc < code || pc >= code_end) {                              \
-            env->pc = (int32_t)(pc - code);                             \
-            env->halted = true;                                         \
-            return r[0];                                                \
-        }                                                               \
-        if (max_steps > 0 && steps++ >= max_steps) {                    \
-            env->pc = (int32_t)(pc - code);                             \
-            return r[0];                                                \
-        }                                                               \
-        uint16_t ins = *pc++;                                           \
-        uint8_t op = (uint8_t)(ins >> 12);                              \
-        a  = (uint8_t)((ins >> 8) & 0xF);                               \
-        b  = (uint8_t)((ins >> 4) & 0xF);                               \
-        c  = (uint8_t)(ins & 0xF);                                      \
-        i8 = (uint8_t)(ins & 0xFF);                                     \
-        goto *dispatch[op];                                             \
-    } while (0)
-
-    NEXT();
-
-L_JR:    pc = code + (uint32_t)r[a]; NEXT();
-L_MOVI:  r[a] = (int8_t)i8; NEXT();
-L_MOV:   r[a] = r[b]; NEXT();
-L_ADD:   r[a] = r[b] + r[c]; NEXT();
-L_SUB:   r[a] = r[b] - r[c]; NEXT();
-L_AND:   r[a] = r[b] & r[c]; NEXT();
-L_OR:    r[a] = r[b] | r[c]; NEXT();
-L_XOR:   r[a] = r[b] ^ r[c]; NEXT();
-L_SHL:   r[a] = (int32_t)((uint32_t)r[a] << (i8 & 31)); NEXT();
-L_SHR:   r[a] = (int32_t)((uint32_t)r[a] >> (i8 & 31)); NEXT();
-L_CMPLT: r[a] = (r[b] < r[c]) ? 1 : 0; NEXT();
-L_JMP: {
-        int32_t off = sext12(code[(size_t)(pc - code) - 1]);
-        pc += off;
-        NEXT();
-    }
-L_JZ:    if (r[a] == 0) pc += (int8_t)i8; NEXT();
-L_LD32: {
-        uint32_t addr = (uint32_t)r[b] + (uint32_t)c * 4u;
-        if (addr + 4u <= mem_size) r[a] = load32_le(mem, addr);
-        NEXT();
-    }
-L_ST32: {
-        uint32_t addr = (uint32_t)r[b] + (uint32_t)c * 4u;
-        if (addr + 4u <= mem_size) {
-            store32_le(mem, addr, r[a]);
-            if (addr == VM_SYS_ADDR && (r[a] & 1)) {
-                if (VM_FRONT_FB_ADDR + VM_FB_SIZE <= mem_size &&
-                    VM_BACK_FB_ADDR + VM_FB_SIZE <= mem_size) {
-                    memcpy(mem + VM_FRONT_FB_ADDR, mem + VM_BACK_FB_ADDR, VM_FB_SIZE);
-                }
-                env->frame_ready = true;
-                env->pc = (int32_t)(pc - code);
-                return r[0];
-            }
+    while (pc < code_len) {
+        if (max_steps && steps >= max_steps) {
+            env->pc = (int32_t)pc;
+            return env->r[0];
         }
-        NEXT();
+        steps++;
+
+        uint16_t ins = code[pc++];
+        uint8_t op = (uint8_t)(ins >> 12);
+        uint8_t a = (uint8_t)((ins >> 8) & 0x0F);
+        uint8_t b = (uint8_t)((ins >> 4) & 0x0F);
+        uint8_t c = (uint8_t)(ins & 0x0F);
+        uint8_t imm8 = (uint8_t)ins;
+        int64_t target;
+        size_t addr;
+
+        switch (op) {
+        case OP_JR:
+            if (env->r[a] < 0 || (uint64_t)env->r[a] > code_len) {
+                vm_halt(env, pc);
+                return env->r[0];
+            }
+            pc = (size_t)env->r[a];
+            break;
+        case OP_MOVI:
+            env->r[a] = sign_extend8(imm8);
+            break;
+        case OP_MOV:
+            env->r[a] = env->r[b];
+            break;
+        case OP_ADD:
+            env->r[a] = uint32_to_int32((uint32_t)env->r[b] +
+                                         (uint32_t)env->r[c]);
+            break;
+        case OP_SUB:
+            env->r[a] = uint32_to_int32((uint32_t)env->r[b] -
+                                         (uint32_t)env->r[c]);
+            break;
+        case OP_AND:
+            env->r[a] = env->r[b] & env->r[c];
+            break;
+        case OP_OR:
+            env->r[a] = env->r[b] | env->r[c];
+            break;
+        case OP_XOR:
+            env->r[a] = env->r[b] ^ env->r[c];
+            break;
+        case OP_SHL:
+            env->r[a] = uint32_to_int32((uint32_t)env->r[a] << (imm8 & 31));
+            break;
+        case OP_SHR:
+            env->r[a] = uint32_to_int32((uint32_t)env->r[a] >> (imm8 & 31));
+            break;
+        case OP_CMPLT:
+            env->r[a] = env->r[b] < env->r[c] ? 1 : 0;
+            break;
+        case OP_JMP:
+            target = (int64_t)pc + sext12(ins);
+            if (target < 0 || (uint64_t)target > code_len) {
+                vm_halt(env, pc);
+                return env->r[0];
+            }
+            pc = (size_t)target;
+            break;
+        case OP_JZ:
+            if (env->r[a] == 0) {
+                target = (int64_t)pc + sign_extend8(imm8);
+                if (target < 0 || (uint64_t)target > code_len) {
+                    vm_halt(env, pc);
+                    return env->r[0];
+                }
+                pc = (size_t)target;
+            }
+            break;
+        case OP_LD32:
+            if (!memory_range_valid(env->mem_size, env->r[b], c, &addr)) {
+                vm_halt(env, pc);
+                return env->r[0];
+            }
+            env->r[a] = load32_le(env->mem, addr);
+            break;
+        case OP_ST32:
+            if (!memory_range_valid(env->mem_size, env->r[b], c, &addr)) {
+                vm_halt(env, pc);
+                return env->r[0];
+            }
+            store32_le(env->mem, addr, env->r[a]);
+            if (addr == VM_SYS_ADDR && (env->r[a] & 1)) {
+                if (VM_FRONT_FB_ADDR > env->mem_size ||
+                    VM_FB_SIZE > env->mem_size - VM_FRONT_FB_ADDR ||
+                    VM_FB_SIZE > env->mem_size - VM_BACK_FB_ADDR) {
+                    vm_halt(env, pc);
+                    return env->r[0];
+                }
+                memcpy(env->mem + VM_FRONT_FB_ADDR, env->mem + VM_BACK_FB_ADDR,
+                       VM_FB_SIZE);
+                env->frame_ready = true;
+                env->pc = (int32_t)pc;
+                return env->r[0];
+            }
+            break;
+        case OP_CALL:
+            target = (int64_t)pc + sext12(ins);
+            if (target < 0 || (uint64_t)target > code_len) {
+                vm_halt(env, pc);
+                return env->r[0];
+            }
+            env->r[14] = (int32_t)pc;
+            pc = (size_t)target;
+            break;
+        default:
+            vm_halt(env, pc);
+            return env->r[0];
+        }
     }
-L_CALL: {
-        int32_t off = sext12(code[(size_t)(pc - code) - 1]);
-        r[14] = (int32_t)(pc - code);
-        pc += off;
-        NEXT();
-    }
-#undef NEXT
+
+    vm_halt(env, pc);
+    return env->r[0];
 }
 
 int32_t vm_run(const uint16_t *code, size_t code_len,
@@ -121,10 +200,9 @@ int32_t vm_run(const uint16_t *code, size_t code_len,
     return vm_run_env(&env, code, code_len, 0);
 }
 
-/* --- Two-Pass Assembler --- */
 typedef struct {
-    char name[64];
-    int32_t addr;
+    char *name;
+    size_t addr;
 } asm_label_t;
 
 static int ascii_strcasecmp(const char *a, const char *b) {
@@ -138,217 +216,444 @@ static int ascii_strcasecmp(const char *a, const char *b) {
     return tolower((unsigned char)*a) - tolower((unsigned char)*b);
 }
 
-static int parse_reg(const char *tok) {
-    if (!tok) return -1;
-    if ((tok[0] == 'r' || tok[0] == 'R') && isdigit((unsigned char)tok[1])) {
+static void asm_error(size_t line, const char *format, ...) {
+    if (line) fprintf(stderr, "Assembler error line %zu: ", line);
+    else fputs("Assembler error: ", stderr);
+    va_list args;
+    va_start(args, format);
+    vfprintf(stderr, format, args);
+    va_end(args);
+    fputc('\n', stderr);
+}
+
+static int parse_reg(const char *token) {
+    if (!token) return -1;
+    if ((token[0] == 'r' || token[0] == 'R') &&
+        isdigit((unsigned char)token[1])) {
         char *end = NULL;
-        long v = strtol(tok + 1, &end, 10);
-        if (*end == '\0' && v >= 0 && v <= 15) return (int)v;
+        errno = 0;
+        long value = strtol(token + 1, &end, 10);
+        if (!errno && end && *end == '\0' && value >= 0 && value <= 15)
+            return (int)value;
     }
-    if (ascii_strcasecmp(tok, "lr") == 0) return 14;
-    if (ascii_strcasecmp(tok, "sp") == 0) return 15;
+    if (ascii_strcasecmp(token, "lr") == 0) return 14;
+    if (ascii_strcasecmp(token, "sp") == 0) return 15;
     return -1;
 }
 
-static int parse_imm(const char *tok, const asm_label_t *labels, int label_count, int32_t *out) {
-    if (!tok) return -1;
-    for (int i = 0; i < label_count; i++) {
-        if (strcmp(tok, labels[i].name) == 0) {
-            *out = labels[i].addr;
-            return 0;
-        }
-    }
-    char *end = NULL;
-    long v = strtol(tok, &end, 0);
-    if (end && *end == '\0') {
-        *out = (int32_t)v;
-        return 0;
-    }
-    return -1;
+static char *trim(char *text) {
+    while (*text && isspace((unsigned char)*text)) text++;
+    char *end = text + strlen(text);
+    while (end > text && isspace((unsigned char)end[-1])) *--end = '\0';
+    return text;
 }
 
 static void strip_comment(char *line) {
     for (char *p = line; *p; p++) {
-        if (*p == ';' || *p == '#' || (*p == '/' && *(p + 1) == '/')) {
+        if (*p == ';' || *p == '#' || (*p == '/' && p[1] == '/')) {
             *p = '\0';
+            return;
+        }
+    }
+}
+
+static const asm_label_t *find_label(const asm_label_t *labels, size_t count,
+                                     const char *name) {
+    for (size_t i = 0; i < count; i++) {
+        if (strcmp(labels[i].name, name) == 0) return &labels[i];
+    }
+    return NULL;
+}
+
+static bool valid_label_name(const char *name) {
+    if (!name || !(isalpha((unsigned char)name[0]) || name[0] == '_' ||
+                   name[0] == '.' || name[0] == '$'))
+        return false;
+    for (const char *p = name + 1; *p; p++) {
+        if (!(isalnum((unsigned char)*p) || *p == '_' || *p == '.' ||
+              *p == '$'))
+            return false;
+    }
+    return true;
+}
+
+static bool split_label(char *line, char **instruction, char **label) {
+    char *colon = strchr(line, ':');
+    *label = NULL;
+    *instruction = trim(line);
+    if (!colon) return true;
+    *colon = '\0';
+    *label = trim(line);
+    *instruction = trim(colon + 1);
+    return valid_label_name(*label);
+}
+
+static bool read_source(FILE *file, char **source, size_t *source_len) {
+    size_t capacity = 4096;
+    size_t length = 0;
+    char *buffer = malloc(capacity);
+    if (!buffer) return false;
+    for (;;) {
+        if (length == capacity) {
+            if (capacity > SIZE_MAX / 2) {
+                free(buffer);
+                return false;
+            }
+            size_t new_capacity = capacity * 2;
+            char *grown = realloc(buffer, new_capacity);
+            if (!grown) {
+                free(buffer);
+                return false;
+            }
+            buffer = grown;
+            capacity = new_capacity;
+        }
+        size_t count = fread(buffer + length, 1, capacity - length, file);
+        length += count;
+        if (count == 0) {
+            if (ferror(file)) {
+                free(buffer);
+                return false;
+            }
             break;
         }
     }
+    if (length == SIZE_MAX) {
+        free(buffer);
+        return false;
+    }
+    char *terminated = realloc(buffer, length + 1);
+    if (!terminated) {
+        free(buffer);
+        return false;
+    }
+    terminated[length] = '\0';
+    *source = terminated;
+    *source_len = length;
+    return true;
 }
 
-static char *trim(char *s) {
-    while (*s && isspace((unsigned char)*s)) s++;
-    char *e = s + strlen(s);
-    while (e > s && isspace((unsigned char)*(e - 1))) *--e = '\0';
-    return s;
+static char *next_line(const char *source, size_t source_len, size_t *offset,
+                       size_t *line_number) {
+    if (*offset >= source_len) return NULL;
+    size_t start = *offset;
+    size_t end = start;
+    while (end < source_len && source[end] != '\n') end++;
+    size_t length = end - start;
+    if (end < source_len) end++;
+    *offset = end;
+    (*line_number)++;
+    char *line = malloc(length + 1);
+    if (!line) return NULL;
+    memcpy(line, source + start, length);
+    line[length] = '\0';
+    return line;
 }
 
-int vm_assemble_file(const char *path, uint16_t *out_code, size_t max_code, size_t *out_len) {
-    FILE *fp = fopen(path, "r");
-    if (!fp) return -1;
-
-    asm_label_t labels[512];
-    int label_count = 0;
-    char line[256];
-
-    /* Pass 1: Collect labels */
-    int32_t pc = 0;
-    while (fgets(line, sizeof(line), fp)) {
-        strip_comment(line);
-        char *s = trim(line);
-        if (*s == '\0') continue;
-
-        char *colon = strchr(s, ':');
-        if (colon) {
-            *colon = '\0';
-            char *lbl = trim(s);
-            if (*lbl && label_count < 512) {
-                strncpy(labels[label_count].name, lbl, 63);
-                labels[label_count].name[63] = '\0';
-                labels[label_count].addr = pc;
-                label_count++;
-            }
-            s = trim(colon + 1);
-            if (*s == '\0') continue;
+static bool add_label(asm_label_t **labels, size_t *count, size_t *capacity,
+                      const char *name, size_t addr, size_t line) {
+    if (find_label(*labels, *count, name)) {
+        asm_error(line, "duplicate label '%s'", name);
+        return false;
+    }
+    if (*count == *capacity) {
+        size_t new_capacity = *capacity ? *capacity * 2 : 32;
+        if (new_capacity < *capacity ||
+            new_capacity > SIZE_MAX / sizeof(**labels)) {
+            asm_error(line, "too many labels");
+            return false;
         }
-        pc++;
+        asm_label_t *grown = realloc(*labels, new_capacity * sizeof(**labels));
+        if (!grown) {
+            asm_error(line, "out of memory while collecting labels");
+            return false;
+        }
+        *labels = grown;
+        *capacity = new_capacity;
+    }
+    char *copy = malloc(strlen(name) + 1);
+    if (!copy) {
+        asm_error(line, "out of memory while collecting labels");
+        return false;
+    }
+    strcpy(copy, name);
+    (*labels)[*count].name = copy;
+    (*labels)[*count].addr = addr;
+    (*count)++;
+    return true;
+}
+
+static bool parse_value(const char *token, const asm_label_t *labels,
+                        size_t label_count, int64_t *value, size_t line) {
+    const asm_label_t *label = find_label(labels, label_count, token);
+    if (label) {
+        *value = (int64_t)label->addr;
+        return true;
+    }
+    errno = 0;
+    char *end = NULL;
+    long long parsed = strtoll(token, &end, 0);
+    if (errno == ERANGE) {
+        asm_error(line, "integer out of range '%s'", token);
+        return false;
+    }
+    if (end && end != token && *end == '\0') {
+        *value = (int64_t)parsed;
+        return true;
+    }
+    if (isalpha((unsigned char)token[0]) || token[0] == '_' ||
+        token[0] == '.' || token[0] == '$') {
+        asm_error(line, "unknown label '%s'", token);
+    } else {
+        asm_error(line, "invalid integer '%s'", token);
+    }
+    return false;
+}
+
+static bool require_reg(const char *token, int *reg, size_t line) {
+    *reg = parse_reg(token);
+    if (*reg >= 0) return true;
+    asm_error(line, "unknown register '%s'", token);
+    return false;
+}
+
+static bool require_count(const char *op, int actual, int expected, size_t line) {
+    if (actual == expected) return true;
+    asm_error(line, "instruction '%s' expects %d operand%s, got %d", op,
+              expected - 1, expected == 2 ? "" : "s", actual - 1);
+    return false;
+}
+
+static bool encode_instruction(char **tokens, int token_count,
+                               const asm_label_t *labels, size_t label_count,
+                               size_t pc, size_t line, uint16_t *instruction) {
+    const char *op = tokens[0];
+    int a, b, c;
+    int64_t value;
+    int32_t offset;
+
+#define MATCH(name) (ascii_strcasecmp(op, name) == 0)
+#define COUNT(n) do { if (!require_count(op, token_count, (n) + 1, line)) return false; } while (0)
+#define REG(index, result) do { if (!require_reg(tokens[index], &(result), line)) return false; } while (0)
+
+    if (MATCH("jr")) {
+        COUNT(1); REG(1, a);
+        *instruction = enc_rrr(OP_JR, (uint8_t)a, 0, 0);
+    } else if (MATCH("movi") || MATCH("shl") || MATCH("shr")) {
+        COUNT(2); REG(1, a);
+        if (!parse_value(tokens[2], labels, label_count, &value, line)) return false;
+        if (MATCH("movi")) {
+            if (value < INT8_MIN || value > UINT8_MAX) {
+                asm_error(line, "movi immediate out of range (%lld; expected -128..255)",
+                          (long long)value);
+                return false;
+            }
+            *instruction = enc_ri8(OP_MOVI, (uint8_t)a, (uint8_t)value);
+        } else {
+            if (value < 0 || value > 31) {
+                asm_error(line, "%s shift out of range (%lld; expected 0..31)",
+                          op, (long long)value);
+                return false;
+            }
+            *instruction = enc_ri8(MATCH("shl") ? OP_SHL : OP_SHR,
+                                   (uint8_t)a, (uint8_t)value);
+        }
+    } else if (MATCH("mov")) {
+        COUNT(2); REG(1, a); REG(2, b);
+        *instruction = enc_rrr(OP_MOV, (uint8_t)a, (uint8_t)b, 0);
+    } else if (MATCH("add") || MATCH("sub") || MATCH("and") ||
+               MATCH("or") || MATCH("xor") || MATCH("cmplt")) {
+        COUNT(3); REG(1, a); REG(2, b); REG(3, c);
+        uint8_t opcode = MATCH("add") ? OP_ADD :
+                         MATCH("sub") ? OP_SUB :
+                         MATCH("and") ? OP_AND :
+                         MATCH("or") ? OP_OR :
+                         MATCH("xor") ? OP_XOR : OP_CMPLT;
+        *instruction = enc_rrr(opcode, (uint8_t)a, (uint8_t)b, (uint8_t)c);
+    } else if (MATCH("jmp") || MATCH("call")) {
+        COUNT(1);
+        if (!parse_value(tokens[1], labels, label_count, &value, line)) return false;
+        if (value < INT32_MIN || value > INT32_MAX) {
+            asm_error(line, "%s target out of range", op);
+            return false;
+        }
+        int64_t branch_offset = value - ((int64_t)pc + 1);
+        if (branch_offset < -2048 || branch_offset > 2047) {
+            asm_error(line, "%s target out of range (offset %lld; expected -2048..2047)",
+                      op, (long long)branch_offset);
+            return false;
+        }
+        offset = (int32_t)branch_offset;
+        *instruction = enc_i12(MATCH("jmp") ? OP_JMP : OP_CALL,
+                               (int16_t)offset);
+    } else if (MATCH("jz")) {
+        COUNT(2); REG(1, a);
+        if (!parse_value(tokens[2], labels, label_count, &value, line)) return false;
+        if (value < INT32_MIN || value > INT32_MAX) {
+            asm_error(line, "jz target out of range");
+            return false;
+        }
+        int64_t branch_offset = value - ((int64_t)pc + 1);
+        if (branch_offset < -128 || branch_offset > 127) {
+            asm_error(line, "jz target out of range (offset %lld; expected -128..127)",
+                      (long long)branch_offset);
+            return false;
+        }
+        *instruction = enc_ri8(OP_JZ, (uint8_t)a, (uint8_t)(int8_t)branch_offset);
+    } else if (MATCH("ld32") || MATCH("st32")) {
+        COUNT(3); REG(1, a); REG(2, b);
+        if (!parse_value(tokens[3], labels, label_count, &value, line)) return false;
+        if (value < 0 || value > 15) {
+            asm_error(line, "%s word offset out of range (%lld; expected 0..15)",
+                      op, (long long)value);
+            return false;
+        }
+        *instruction = enc_rrr(MATCH("ld32") ? OP_LD32 : OP_ST32,
+                               (uint8_t)a, (uint8_t)b, (uint8_t)value);
+    } else {
+        asm_error(line, "unknown instruction '%s'", op);
+        return false;
+    }
+#undef REG
+#undef COUNT
+#undef MATCH
+    return true;
+}
+
+int vm_assemble_file(const char *path, uint16_t *out_code, size_t max_code,
+                    size_t *out_len) {
+    if (!path || !out_code || !out_len) {
+        asm_error(0, "path, output buffer, and output length are required");
+        return -1;
     }
 
-    /* Pass 2: Encode instructions */
-    rewind(fp);
-    pc = 0;
-    int line_no = 0;
-    while (fgets(line, sizeof(line), fp)) {
-        line_no++;
-        strip_comment(line);
-        char *s = trim(line);
-        if (*s == '\0') continue;
-
-        char *colon = strchr(s, ':');
-        if (colon) {
-            s = trim(colon + 1);
-            if (*s == '\0') continue;
-        }
-
-        if ((size_t)pc >= max_code) {
-            fprintf(stderr, "Assembler error: program exceeds max_code\n");
-            fclose(fp);
-            return -1;
-        }
-
-        char *toks[5] = {0};
-        int ntok = 0;
-        char *p = strtok(s, " ,\t\r\n");
-        while (p && ntok < 5) {
-            toks[ntok++] = p;
-            p = strtok(NULL, " ,\t\r\n");
-        }
-        if (ntok == 0) continue;
-
-        uint16_t ins = 0;
-        int ok = 0;
-        const char *op = toks[0];
-
-        if (ascii_strcasecmp(op, "jr") == 0 && ntok == 2) {
-            int a = parse_reg(toks[1]);
-            if (a >= 0) { ins = enc_rrr(OP_JR, (uint8_t)a, 0, 0); ok = 1; }
-        } else if (ascii_strcasecmp(op, "movi") == 0 && ntok == 3) {
-            int a = parse_reg(toks[1]);
-            int32_t imm = 0;
-            if (a >= 0 && parse_imm(toks[2], labels, label_count, &imm) == 0) {
-                ins = enc_ri8(OP_MOVI, (uint8_t)a, (uint8_t)(imm & 0xFF));
-                ok = 1;
-            }
-        } else if (ascii_strcasecmp(op, "mov") == 0 && ntok == 3) {
-            int a = parse_reg(toks[1]), b = parse_reg(toks[2]);
-            if (a >= 0 && b >= 0) { ins = enc_rrr(OP_MOV, (uint8_t)a, (uint8_t)b, 0); ok = 1; }
-        } else if (ascii_strcasecmp(op, "add") == 0 && ntok == 4) {
-            int a = parse_reg(toks[1]), b = parse_reg(toks[2]), c = parse_reg(toks[3]);
-            if (a >= 0 && b >= 0 && c >= 0) { ins = enc_rrr(OP_ADD, (uint8_t)a, (uint8_t)b, (uint8_t)c); ok = 1; }
-        } else if (ascii_strcasecmp(op, "sub") == 0 && ntok == 4) {
-            int a = parse_reg(toks[1]), b = parse_reg(toks[2]), c = parse_reg(toks[3]);
-            if (a >= 0 && b >= 0 && c >= 0) { ins = enc_rrr(OP_SUB, (uint8_t)a, (uint8_t)b, (uint8_t)c); ok = 1; }
-        } else if (ascii_strcasecmp(op, "and") == 0 && ntok == 4) {
-            int a = parse_reg(toks[1]), b = parse_reg(toks[2]), c = parse_reg(toks[3]);
-            if (a >= 0 && b >= 0 && c >= 0) { ins = enc_rrr(OP_AND, (uint8_t)a, (uint8_t)b, (uint8_t)c); ok = 1; }
-        } else if (ascii_strcasecmp(op, "or") == 0 && ntok == 4) {
-            int a = parse_reg(toks[1]), b = parse_reg(toks[2]), c = parse_reg(toks[3]);
-            if (a >= 0 && b >= 0 && c >= 0) { ins = enc_rrr(OP_OR, (uint8_t)a, (uint8_t)b, (uint8_t)c); ok = 1; }
-        } else if (ascii_strcasecmp(op, "xor") == 0 && ntok == 4) {
-            int a = parse_reg(toks[1]), b = parse_reg(toks[2]), c = parse_reg(toks[3]);
-            if (a >= 0 && b >= 0 && c >= 0) { ins = enc_rrr(OP_XOR, (uint8_t)a, (uint8_t)b, (uint8_t)c); ok = 1; }
-        } else if (ascii_strcasecmp(op, "shl") == 0 && ntok == 3) {
-            int a = parse_reg(toks[1]);
-            int32_t imm = 0;
-            if (a >= 0 && parse_imm(toks[2], labels, label_count, &imm) == 0) {
-                ins = enc_ri8(OP_SHL, (uint8_t)a, (uint8_t)(imm & 0xFF));
-                ok = 1;
-            }
-        } else if (ascii_strcasecmp(op, "shr") == 0 && ntok == 3) {
-            int a = parse_reg(toks[1]);
-            int32_t imm = 0;
-            if (a >= 0 && parse_imm(toks[2], labels, label_count, &imm) == 0) {
-                ins = enc_ri8(OP_SHR, (uint8_t)a, (uint8_t)(imm & 0xFF));
-                ok = 1;
-            }
-        } else if (ascii_strcasecmp(op, "cmplt") == 0 && ntok == 4) {
-            int a = parse_reg(toks[1]), b = parse_reg(toks[2]), c = parse_reg(toks[3]);
-            if (a >= 0 && b >= 0 && c >= 0) { ins = enc_rrr(OP_CMPLT, (uint8_t)a, (uint8_t)b, (uint8_t)c); ok = 1; }
-        } else if (ascii_strcasecmp(op, "jmp") == 0 && ntok == 2) {
-            int32_t target = 0;
-            if (parse_imm(toks[1], labels, label_count, &target) == 0) {
-                int32_t off = target - (pc + 1);
-                if (off >= -2048 && off <= 2047) {
-                    ins = enc_i12(OP_JMP, (int16_t)off);
-                    ok = 1;
-                }
-            }
-        } else if (ascii_strcasecmp(op, "jz") == 0 && ntok == 3) {
-            int a = parse_reg(toks[1]);
-            int32_t target = 0;
-            if (a >= 0 && parse_imm(toks[2], labels, label_count, &target) == 0) {
-                int32_t off = target - (pc + 1);
-                if (off >= -128 && off <= 127) {
-                    ins = enc_ri8(OP_JZ, (uint8_t)a, (uint8_t)(int8_t)off);
-                    ok = 1;
-                } else {
-                    fprintf(stderr, "Assembler error line %d: jz target out of range (%d)\n", line_no, off);
-                }
-            }
-        } else if (ascii_strcasecmp(op, "ld32") == 0 && ntok == 4) {
-            int a = parse_reg(toks[1]), b = parse_reg(toks[2]);
-            int32_t c = 0;
-            if (a >= 0 && b >= 0 && parse_imm(toks[3], labels, label_count, &c) == 0 && c >= 0 && c <= 15) {
-                ins = enc_rrr(OP_LD32, (uint8_t)a, (uint8_t)b, (uint8_t)c);
-                ok = 1;
-            }
-        } else if (ascii_strcasecmp(op, "st32") == 0 && ntok == 4) {
-            int a = parse_reg(toks[1]), b = parse_reg(toks[2]);
-            int32_t c = 0;
-            if (a >= 0 && b >= 0 && parse_imm(toks[3], labels, label_count, &c) == 0 && c >= 0 && c <= 15) {
-                ins = enc_rrr(OP_ST32, (uint8_t)a, (uint8_t)b, (uint8_t)c);
-                ok = 1;
-            }
-        } else if (ascii_strcasecmp(op, "call") == 0 && ntok == 2) {
-            int32_t target = 0;
-            if (parse_imm(toks[1], labels, label_count, &target) == 0) {
-                int32_t off = target - (pc + 1);
-                if (off >= -2048 && off <= 2047) {
-                    ins = enc_i12(OP_CALL, (int16_t)off);
-                    ok = 1;
-                }
-            }
-        }
-
-        if (!ok) {
-            fprintf(stderr, "Assembler error at line %d\n", line_no);
-            fclose(fp);
-            return -1;
-        }
-        out_code[pc++] = ins;
+    FILE *file = fopen(path, "rb");
+    if (!file) {
+        asm_error(0, "cannot open '%s': %s", path, strerror(errno));
+        return -1;
+    }
+    char *source = NULL;
+    size_t source_len = 0;
+    if (!read_source(file, &source, &source_len)) {
+        asm_error(0, "failed to read '%s'", path);
+        fclose(file);
+        return -1;
+    }
+    if (fclose(file) != 0) {
+        asm_error(0, "failed to close '%s'", path);
+        free(source);
+        return -1;
+    }
+    if (memchr(source, '\0', source_len)) {
+        asm_error(0, "source contains a NUL byte");
+        free(source);
+        return -1;
     }
 
-    fclose(fp);
-    *out_len = (size_t)pc;
-    return 0;
+    asm_label_t *labels = NULL;
+    size_t label_count = 0, label_capacity = 0;
+    size_t instruction_count = 0, offset = 0, line_number = 0;
+    bool ok = true;
+    while (offset < source_len) {
+        char *line = next_line(source, source_len, &offset, &line_number);
+        if (!line) {
+            asm_error(line_number + 1, "out of memory while reading source");
+            ok = false;
+            break;
+        }
+        strip_comment(line);
+        char *instruction = NULL, *label = NULL;
+        if (!split_label(line, &instruction, &label)) {
+            asm_error(line_number, "invalid label '%s'", label ? label : "");
+            ok = false;
+        } else if (label && !add_label(&labels, &label_count, &label_capacity,
+                                       label, instruction_count, line_number)) {
+            ok = false;
+        }
+        if (ok && *instruction) {
+            if (instruction_count >= max_code) {
+                asm_error(line_number, "program exceeds max_code (%zu)", max_code);
+                ok = false;
+            } else if (instruction_count >= INT32_MAX) {
+                asm_error(line_number, "program exceeds VM addressable code range");
+                ok = false;
+            } else {
+                instruction_count++;
+            }
+        }
+        free(line);
+        if (!ok) break;
+    }
+
+    if (ok && max_code > SIZE_MAX / sizeof(uint16_t)) {
+        asm_error(0, "max_code is too large");
+        ok = false;
+    }
+    uint16_t *encoded = NULL;
+    if (ok && max_code) {
+        encoded = malloc(max_code * sizeof(*encoded));
+        if (!encoded) {
+            asm_error(0, "out of memory for output buffer");
+            ok = false;
+        }
+    }
+
+    offset = 0;
+    line_number = 0;
+    size_t pc = 0;
+    while (ok && offset < source_len) {
+        char *line = next_line(source, source_len, &offset, &line_number);
+        if (!line) {
+            asm_error(line_number + 1, "out of memory while reading source");
+            ok = false;
+            break;
+        }
+        strip_comment(line);
+        char *instruction = NULL, *label = NULL;
+        if (!split_label(line, &instruction, &label)) {
+            asm_error(line_number, "invalid label '%s'", label ? label : "");
+            ok = false;
+            free(line);
+            break;
+        }
+        if (!*instruction) {
+            free(line);
+            continue;
+        }
+        char *tokens[6] = {0};
+        int token_count = 0;
+        char *token = strtok(instruction, " ,\t\r\n");
+        while (token && token_count < 6) {
+            tokens[token_count++] = token;
+            token = strtok(NULL, " ,\t\r\n");
+        }
+        if (token_count > 5) {
+            asm_error(line_number, "too many operands");
+            ok = false;
+        } else if (token_count == 0) {
+            asm_error(line_number, "missing instruction");
+            ok = false;
+        } else {
+            ok = encode_instruction(tokens, token_count, labels, label_count,
+                                    pc, line_number, &encoded[pc]);
+        }
+        if (ok) pc++;
+        free(line);
+    }
+
+    if (ok && pc != instruction_count) {
+        asm_error(0, "internal assembler pass mismatch");
+        ok = false;
+    }
+    if (ok) {
+        if (instruction_count)
+            memcpy(out_code, encoded, instruction_count * sizeof(*out_code));
+        *out_len = instruction_count;
+    }
+
+    for (size_t i = 0; i < label_count; i++) free(labels[i].name);
+    free(labels);
+    free(encoded);
+    free(source);
+    return ok ? 0 : -1;
 }

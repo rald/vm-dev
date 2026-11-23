@@ -160,6 +160,7 @@ static const uint8_t DOS_FONT_8X8[128][8] = {
 static uint32_t poll_inputs(void) {
     const uint8_t *keys = SDL_GetKeyboardState(NULL);
     uint32_t mask = 0;
+    if (!keys) return mask;
 
     /* ARROWS or WASD */
     if (keys[SDL_SCANCODE_UP]    || keys[SDL_SCANCODE_W]) mask |= BTN_UP;
@@ -210,11 +211,16 @@ int main(int argc, char **argv) {
 
     if (SDL_Init(SDL_INIT_VIDEO) != 0) {
         fprintf(stderr, "SDL_Init error: %s\n", SDL_GetError());
+        SDL_Quit();
         return 1;
     }
 
+    int result = 1;
+    SDL_Window *window = NULL;
+    SDL_Renderer *renderer = NULL;
+    SDL_Texture *texture = NULL;
     const int scale = 5;
-    SDL_Window *window = SDL_CreateWindow(
+    window = SDL_CreateWindow(
         "VM 128x128 Sweetie-16 - Arkanoid",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
         VM_SCREEN_W * scale, VM_SCREEN_H * scale,
@@ -222,24 +228,34 @@ int main(int argc, char **argv) {
     );
     if (!window) {
         fprintf(stderr, "SDL_CreateWindow error: %s\n", SDL_GetError());
-        SDL_Quit();
-        return 1;
+        goto cleanup;
     }
 
-    SDL_Renderer *renderer = SDL_CreateRenderer(
+    renderer = SDL_CreateRenderer(
         window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC
     );
     if (!renderer) {
         renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_SOFTWARE);
     }
-    SDL_RenderSetLogicalSize(renderer, VM_SCREEN_W, VM_SCREEN_H);
+    if (!renderer) {
+        fprintf(stderr, "SDL_CreateRenderer error: %s\n", SDL_GetError());
+        goto cleanup;
+    }
+    if (SDL_RenderSetLogicalSize(renderer, VM_SCREEN_W, VM_SCREEN_H) != 0) {
+        fprintf(stderr, "SDL_RenderSetLogicalSize error: %s\n", SDL_GetError());
+        goto cleanup;
+    }
 
-    SDL_Texture *texture = SDL_CreateTexture(
+    texture = SDL_CreateTexture(
         renderer,
         SDL_PIXELFORMAT_ARGB8888,
         SDL_TEXTUREACCESS_STREAMING,
         VM_SCREEN_W, VM_SCREEN_H
     );
+    if (!texture) {
+        fprintf(stderr, "SDL_CreateTexture error: %s\n", SDL_GetError());
+        goto cleanup;
+    }
 
     uint8_t mem[VM_MEM_SIZE];
     memset(mem, 0, sizeof(mem));
@@ -256,12 +272,18 @@ int main(int argc, char **argv) {
     bool running = true;
     const double target_dt = 1.0 / 60.0;
     uint64_t perf_freq = SDL_GetPerformanceFrequency();
+    if (!perf_freq) {
+        fprintf(stderr, "SDL_GetPerformanceFrequency returned zero\n");
+        goto cleanup;
+    }
     uint64_t last_counter = SDL_GetPerformanceCounter();
     double accumulator = 0.0;
 
     while (running && !env.halted) {
         uint64_t now_counter = SDL_GetPerformanceCounter();
-        double delta_time = (double)(now_counter - last_counter) / (double)perf_freq;
+        double delta_time = now_counter >= last_counter
+            ? (double)(now_counter - last_counter) / (double)perf_freq
+            : 0.0;
         last_counter = now_counter;
 
         /* Clamp delta_time to avoid spiral of death after window drag/pause */
@@ -281,7 +303,13 @@ int main(int argc, char **argv) {
 
         /* Write polled input state into memory-mapped input register */
         uint32_t btn_mask = poll_inputs();
-        memcpy(mem + VM_INPUT_ADDR, &btn_mask, sizeof(btn_mask));
+        if (VM_INPUT_ADDR <= sizeof(mem) &&
+            sizeof(btn_mask) <= sizeof(mem) - VM_INPUT_ADDR) {
+            memcpy(mem + VM_INPUT_ADDR, &btn_mask, sizeof(btn_mask));
+        } else {
+            fprintf(stderr, "VM input register is outside memory\n");
+            goto cleanup;
+        }
 
         /* Step VM at fixed 60 Hz intervals driven by measured delta_time */
         while (accumulator >= target_dt && !env.halted) {
@@ -295,15 +323,22 @@ int main(int argc, char **argv) {
 
         /* Convert 4bpp framebuffer using Sweetie-16 palette & present */
         render_framebuffer(mem + VM_FRONT_FB_ADDR, argb_pixels);
-        SDL_UpdateTexture(texture, NULL, argb_pixels, VM_SCREEN_W * sizeof(uint32_t));
-        SDL_RenderClear(renderer);
-        SDL_RenderCopy(renderer, texture, NULL, NULL);
+        if (SDL_UpdateTexture(texture, NULL, argb_pixels,
+                              VM_SCREEN_W * (int)sizeof(uint32_t)) != 0 ||
+            SDL_RenderClear(renderer) != 0 ||
+            SDL_RenderCopy(renderer, texture, NULL, NULL) != 0) {
+            fprintf(stderr, "SDL rendering error: %s\n", SDL_GetError());
+            goto cleanup;
+        }
         SDL_RenderPresent(renderer);
     }
 
-    SDL_DestroyTexture(texture);
-    SDL_DestroyRenderer(renderer);
-    SDL_DestroyWindow(window);
+    result = 0;
+
+cleanup:
+    if (texture) SDL_DestroyTexture(texture);
+    if (renderer) SDL_DestroyRenderer(renderer);
+    if (window) SDL_DestroyWindow(window);
     SDL_Quit();
-    return 0;
+    return result;
 }
